@@ -20,13 +20,13 @@ import * as dogsvr from '@dogsvr/dogsvr/main_thread';
 import { TsrpcCL } from '@dogsvr/cl-tsrpc';
 
 const connLayer: TsrpcCL = new TsrpcCL(3000); // connection layer using tsrpc
-const mainThreadInfo: dogsvr.MainThreadInfo =
+const svrCfg: dogsvr.SvrConfig =
 {
     workerThreadRunFile: "./test_svr_logic.js", // worker thread file name
     workerThreadNum: 2,
     connLayer: connLayer,
 }
-dogsvr.startServer(mainThreadInfo);
+dogsvr.startServer(svrCfg);
 ```
 4. writing worker thread file
 ```ts

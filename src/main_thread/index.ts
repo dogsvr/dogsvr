@@ -5,21 +5,21 @@ import { Msg } from "../message";
 import { traceLog, debugLog, infoLog, warnLog, errorLog } from "../logger";
 import "./pm2"
 
-export interface MainThreadInfo {
+export interface SvrConfig {
     workerThreadRunFile: string;
     workerThreadNum: number;
     connLayer: BaseCL;
 }
-let mtInfo: MainThreadInfo | null = null;
+let svrCfg: SvrConfig | null = null;
 
 export function getConnLayer(): BaseCL {
-    return mtInfo!.connLayer;
+    return svrCfg!.connLayer;
 }
 
-export async function startServer(info: MainThreadInfo) {
-    mtInfo = info;
+export async function startServer(cfg: SvrConfig) {
+    svrCfg = cfg;
     await startWorkerThreads();
-    await mtInfo.connLayer.startListen();
+    await svrCfg.connLayer.startListen();
     infoLog("start dog server successfully");
 }
 
@@ -27,8 +27,8 @@ let workerThreads: Worker[] = [];
 const txnMgr: TxnMgr = new TxnMgr();
 
 async function startWorkerThreads() {
-    for (let i = 0; i < mtInfo!.workerThreadNum; ++i) {
-        const worker = new Worker(mtInfo!.workerThreadRunFile);
+    for (let i = 0; i < svrCfg!.workerThreadNum; ++i) {
+        const worker = new Worker(svrCfg!.workerThreadRunFile);
         workerThreads.push(worker);
         worker.on("message", (msg: Msg) => {
             txnMgr.onWorkerThreadMsg(msg);
