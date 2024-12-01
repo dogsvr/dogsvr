@@ -1,5 +1,5 @@
 import { Worker } from "worker_threads"
-import { BaseCL } from "./conn_layer/base_cl";
+import { BaseCL, BaseCLC } from "./conn_layer/base_cl";
 import { TxnMgr } from "./transaction";
 import { Msg } from "../message";
 import { traceLog, debugLog, infoLog, warnLog, errorLog } from "../logger";
@@ -8,18 +8,22 @@ import "./pm2"
 export interface SvrConfig {
     workerThreadRunFile: string;
     workerThreadNum: number;
-    connLayer: BaseCL;
+    clMap: { [clName: string]: BaseCL };
+    clcMap: { [clcName: string]: BaseCLC };
 }
 let svrCfg: SvrConfig | null = null;
 
-export function getConnLayer(): BaseCL {
-    return svrCfg!.connLayer;
+export function getConnLayer(clName: string): BaseCL {
+    return svrCfg!.clMap[clName];
 }
 
 export async function startServer(cfg: SvrConfig) {
     svrCfg = cfg;
     await startWorkerThreads();
-    await svrCfg.connLayer.startListen();
+    for(let cl of Object.values(svrCfg!.clMap))
+    {
+        await cl.startListen();
+    }
     infoLog("start dog server successfully");
 }
 
