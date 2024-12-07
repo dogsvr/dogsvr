@@ -1,5 +1,4 @@
-import { errorLog } from "../logger";
-import { Msg } from "../message";
+import { errorLog } from "./logger";
 
 class Txn {
     txnId: number;
@@ -36,11 +35,11 @@ export class TxnMgr {
         this.txnMap[txnId] = new Txn(txnId, callback);
     }
 
-    onWorkerThreadMsg(msg: Msg) {
-        let txnId = msg.txnId;
+    onCallback(txnId: number): Function | undefined {
         if (this.txnMap[txnId]) {
-            this.txnMap[txnId].callback(msg);
+            let cb = this.txnMap[txnId].callback;
             delete this.txnMap[txnId];
+            return cb;
         }
     }
 }

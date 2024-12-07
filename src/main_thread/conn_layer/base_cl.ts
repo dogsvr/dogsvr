@@ -1,4 +1,5 @@
 import { Msg } from "../../message";
+import { Worker } from "worker_threads"
 
 export type AuthFuncType = (msg: Msg) => Promise<boolean>;
 
@@ -10,5 +11,5 @@ export abstract class BaseCL {
 
 // client that communicates with connection layer
 export abstract class BaseCLC {
-    abstract call(msg: Msg): Promise<Msg>;
+    abstract callCmd(msg: Msg, thread: Worker): Promise<void>;
 }

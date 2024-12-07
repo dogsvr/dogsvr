@@ -1,6 +1,6 @@
 import { Worker } from "worker_threads"
 import { BaseCL, BaseCLC } from "./conn_layer/base_cl";
-import { TxnMgr } from "./transaction";
+import { TxnMgr } from "../transaction";
 import { Msg } from "../message";
 import { traceLog, debugLog, infoLog, warnLog, errorLog } from "../logger";
 import "./pm2"
@@ -35,7 +35,17 @@ async function startWorkerThreads() {
         const worker = new Worker(svrCfg!.workerThreadRunFile);
         workerThreads.push(worker);
         worker.on("message", (msg: Msg) => {
-            txnMgr.onWorkerThreadMsg(msg);
+            if (msg.clcOptions) {
+                svrCfg!.clcMap[msg.clcOptions.clcName].callCmd(msg, worker);
+            }
+            else {
+                let cb = txnMgr.onCallback(msg.txnId);
+                if (cb) {
+                    cb(msg);
+                } else {
+                    errorLog(`No callback for txnId ${msg.txnId}|${msg.cmdId}`);
+                }
+            }
         });
     }
 }

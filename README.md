@@ -24,7 +24,8 @@ const svrCfg: dogsvr.SvrConfig =
 {
     workerThreadRunFile: "./test_svr_logic.js", // worker thread file name
     workerThreadNum: 2,
-    connLayer: connLayer,
+    clMap: { "tsrpc": connLayer },
+    clcMap: {}
 }
 dogsvr.startServer(svrCfg);
 ```
