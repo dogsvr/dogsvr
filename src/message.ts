@@ -1,14 +1,25 @@
+export type ClcOptions = {
+    clcName: string,
+    noResponse?: boolean
+};
+export type ClOptions = {
+    clName: string,
+    connKeys: string[]  // For example, concatenate openId and zoneId, and zoneId fixed length
+};
+export type MsgHeadType = {
+    cmdId: number,
+    openId: string,
+    zoneId: number,
+    txnId?: number,
+    clcOptions?: ClcOptions,
+    clOptions?: ClOptions
+};
 export type MsgBodyType = Uint8Array | string;
-export type ClcOptions = { clcName: string };
-export type ClOptions = { clName: string, connKey: string };
 
 export class Msg {
     constructor(
-        public cmdId: number,
-        public txnId: number,
+        public head: MsgHeadType,
         public body: MsgBodyType,
-        public clcOptions?: ClcOptions,
-        public clOptions?: ClOptions
     ) {
     }
 }

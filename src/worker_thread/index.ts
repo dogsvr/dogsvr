@@ -1,6 +1,6 @@
 import { parentPort } from 'worker_threads';
 import { errorLog } from '../logger';
-import { Msg, MsgBodyType } from '../message';
+import { Msg, MsgHeadType, MsgBodyType } from '../message';
 import { TxnMgr } from "../transaction";
 
 export type HandlerType = (reqMsg: Msg, innerReq: MsgBodyType) => Promise<void>;
@@ -17,19 +17,19 @@ export function regCmdHandler(cmdId: number, handler: HandlerType) {
 }
 
 parentPort!.on('message', (msg: Msg) => {
-    if (msg.clcOptions) {
-        let cb = txnMgr.onCallback(msg.txnId);
+    if (msg.head.clcOptions) {
+        let cb = txnMgr.onCallback(msg.head.txnId!);
         if (cb) {
             cb(msg.body);
         } else {
-            errorLog(`No callback for txnId ${msg.txnId}|${msg.cmdId}|${msg.clcOptions}`);
+            errorLog(`No callback for txnId ${msg.head.txnId}|${msg.head.cmdId}`);
         }
     } else {
-        const handler = handlerMap[msg.cmdId];
+        const handler = handlerMap[msg.head.cmdId];
         if (handler) {
             handler(msg, msg.body);
         } else {
-            errorLog(`No handler for cmdId ${msg.cmdId}`);
+            errorLog(`No handler for cmdId ${msg.head.cmdId}`);
         }
     }
 }
@@ -40,12 +40,27 @@ export function respondCmd(reqMsg: Msg, innerRes: MsgBodyType) {
     parentPort!.postMessage(reqMsg);
 }
 
-export function callCmdByClc(clcName: string, cmdId: number, innerReq: MsgBodyType, options?: any): Promise<MsgBodyType> {
-    return new Promise((resolve, reject) => {
-        let msg = new Msg(cmdId, txnMgr.genNewTxnId(), innerReq, { clcName: clcName });
+export function callCmdByClc(clcName: string, msgHead: MsgHeadType, innerReq: MsgBodyType, noResponse?: boolean): Promise<MsgBodyType> | void {
+    if (noResponse) {
+        msgHead.clcOptions = { clcName: clcName, noResponse: true };
+        let msg = new Msg(msgHead, innerReq);
         parentPort!.postMessage(msg);
-        txnMgr.addTxn(msg.txnId, resolve);
-    });
+    }
+    else {
+        return new Promise((resolve, reject) => {
+            msgHead.txnId = txnMgr.genNewTxnId();
+            msgHead.clcOptions = { clcName: clcName };
+            let msg = new Msg(msgHead, innerReq);
+            parentPort!.postMessage(msg);
+            txnMgr.addTxn(msg.head.txnId!, resolve);
+        });
+    }
+}
+
+export function pushMsgByCl(clName: string, connKeys: string[], msgHead: MsgHeadType, innerReq: MsgBodyType) {
+    msgHead.clOptions = { clName: clName, connKeys: connKeys };
+    let msg = new Msg(msgHead, innerReq);
+    parentPort!.postMessage(msg);
 }
 
 export * from "../message"

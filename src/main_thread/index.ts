@@ -35,15 +35,18 @@ async function startWorkerThreads() {
         const worker = new Worker(svrCfg!.workerThreadRunFile);
         workerThreads.push(worker);
         worker.on("message", (msg: Msg) => {
-            if (msg.clcOptions) {
-                svrCfg!.clcMap[msg.clcOptions.clcName].callCmd(msg, worker);
+            if (msg.head.clcOptions) {
+                svrCfg!.clcMap[msg.head.clcOptions.clcName].callCmd(msg, msg.head.clcOptions.noResponse ? undefined : worker);
+            }
+            else if (msg.head.clOptions) {
+                svrCfg!.clMap[msg.head.clOptions.clName].pushMsg(msg);
             }
             else {
-                let cb = txnMgr.onCallback(msg.txnId);
+                let cb = txnMgr.onCallback(msg.head.txnId!);
                 if (cb) {
                     cb(msg);
                 } else {
-                    errorLog(`No callback for txnId ${msg.txnId}|${msg.cmdId}`);
+                    errorLog(`No callback for txnId ${msg.head.txnId}|${msg.head.cmdId}`);
                 }
             }
         });
@@ -58,10 +61,10 @@ function getWorkerThread(): Worker {
 
 export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
     return new Promise((resolve, reject) => {
-        msg.txnId = txnMgr.genNewTxnId();
+        msg.head.txnId = txnMgr.genNewTxnId();
         let worker = getWorkerThread();
         worker.postMessage(msg);
-        txnMgr.addTxn(msg.txnId, resolve);
+        txnMgr.addTxn(msg.head.txnId, resolve);
     });
 }
 
