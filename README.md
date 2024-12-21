@@ -18,11 +18,12 @@ npm install @dogsvr/cl-tsrpc
 ```ts
 import * as dogsvr from '@dogsvr/dogsvr/main_thread';
 import { TsrpcCL } from '@dogsvr/cl-tsrpc';
+import * as path from "node:path";
 
-const connLayer: TsrpcCL = new TsrpcCL(3000); // connection layer using tsrpc
+const connLayer: TsrpcCL = new TsrpcCL("ws", 3000); // connection layer using tsrpc
 const svrCfg: dogsvr.SvrConfig =
 {
-    workerThreadRunFile: "./test_svr_logic.js", // worker thread file name
+    workerThreadRunFile: path.resolve(__dirname, "test_svr_logic.js"), // worker thread file name
     workerThreadNum: 2,
     clMap: { "tsrpc": connLayer },
     clcMap: {}
