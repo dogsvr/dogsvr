@@ -1,9 +1,10 @@
 # dogsvr
-dogsvr is a game server package based on nodejs, and makes writing game server easier for rapid development of small teams.
+dogsvr is a game server package based on nodejs, makes writing game server easier.
 
 # features
-- Adapt to multiple connection methods
-- User-defined protocol serialization
+- Multi thread model by nodejs worker
+- Adapt to multiple connection layers
+- Unrestricted protocol serialization
 - Hot update server logic
 
 # usage
