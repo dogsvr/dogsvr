@@ -51,4 +51,5 @@ pm2 trigger test_svr hotUpdate  #hot update when any logic file has been changed
 Please see [example-proj](https://github.com/dogsvr/example-proj) for complete codes.
 
 # architecture
-TODO
+![image](https://github.com/user-attachments/assets/8903ee30-36c6-4922-a5d9-5a0715c1ded4)
+
