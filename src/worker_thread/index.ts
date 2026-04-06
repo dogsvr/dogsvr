@@ -57,8 +57,8 @@ export function callCmdByClc(clcName: string, msgHead: MsgHeadType, innerReq: Ms
     }
 }
 
-export function pushMsgByCl(clName: string, connKeys: string[], msgHead: MsgHeadType, innerReq: MsgBodyType) {
-    msgHead.clOptions = { clName: clName, connKeys: connKeys };
+export function pushMsgByCl(clName: string, gids: number[], msgHead: MsgHeadType, innerReq: MsgBodyType) {
+    msgHead.clOptions = { clName: clName, gids: gids };
     let msg = new Msg(msgHead, innerReq);
     parentPort!.postMessage(msg);
 }

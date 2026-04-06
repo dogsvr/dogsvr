@@ -14,12 +14,11 @@ export type ClcOptions = {
  * Options attached to push messages sent to clients via BaseCL.
  * @property clName - Name of the inbound connection layer to push through
  *   (must match a key in SvrConfig.clMap).
- * @property connKeys - List of connection identifiers to push to.
- *   Typically formed by concatenating openId and zoneId (zoneId fixed length).
+ * @property gids - List of gid (global identifiers) to push to.
  */
 export type ClOptions = {
     clName: string,
-    connKeys: string[]
+    gids: number[]
 };
 
 /**
