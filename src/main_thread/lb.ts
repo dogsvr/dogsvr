@@ -1,19 +1,19 @@
 import { Msg } from "../message";
 
-// ---- 策略配置（判别联合类型）----
+// ---- Strategy config (discriminated union) ----
 
 export type RoundRobinConfig    = { strategy: 'roundRobin' };
 export type RandomConfig         = { strategy: 'random' };
 export type LeastLoadConfig      = { strategy: 'leastLoad' };
 export type ConsistentHashConfig = {
     strategy: 'consistentHash';
-    hashKey?: 'openId' | 'zoneId';   // 默认 'openId'
+    hashKey?: 'openId' | 'zoneId' | 'gid';   // default 'gid'
 };
 export type LbStrategyConfig =
     | RoundRobinConfig | RandomConfig
     | LeastLoadConfig  | ConsistentHashConfig;
 
-// ---- 接口 ----
+// ---- Interface ----
 
 export interface ILoadBalancer {
     selectWorkerIndex(msg: Msg, workerCount: number): number;
@@ -21,7 +21,7 @@ export interface ILoadBalancer {
     onMessageResolved(workerIndex: number): void;
 }
 
-// ---- 轮询 ----
+// ---- Round Robin ----
 
 export class RoundRobinLB implements ILoadBalancer {
     private index = 0;
@@ -33,7 +33,7 @@ export class RoundRobinLB implements ILoadBalancer {
     onMessageResolved(_i: number) {}
 }
 
-// ---- 随机 ----
+// ---- Random ----
 
 export class RandomLB implements ILoadBalancer {
     selectWorkerIndex(_msg: Msg, workerCount: number): number {
@@ -43,7 +43,7 @@ export class RandomLB implements ILoadBalancer {
     onMessageResolved(_i: number) {}
 }
 
-// ---- 最少负载（主线程侧计数，无需跨线程通信）----
+// ---- Least Load (counting on main thread, no cross-thread communication needed) ----
 
 export class LeastLoadLB implements ILoadBalancer {
     private pending: number[];
@@ -57,12 +57,12 @@ export class LeastLoadLB implements ILoadBalancer {
     onMessageResolved(i: number) { if (this.pending[i] > 0) this.pending[i]--; }
 }
 
-// ---- 一致性哈希（djb2，纯 TS 实现，无外部依赖）----
+// ---- Consistent Hash (djb2, pure TS implementation, no external dependencies) ----
 
 export class ConsistentHashLB implements ILoadBalancer {
-    private hashKey: 'openId' | 'zoneId';
+    private hashKey: 'openId' | 'zoneId' | 'gid';
     constructor(cfg: ConsistentHashConfig) {
-        this.hashKey = cfg.hashKey ?? 'openId';
+        this.hashKey = cfg.hashKey ?? 'gid';
     }
     private djb2(s: string): number {
         let h = 5381;
@@ -71,15 +71,17 @@ export class ConsistentHashLB implements ILoadBalancer {
         return h;
     }
     selectWorkerIndex(msg: Msg, workerCount: number): number {
-        const key = this.hashKey === 'zoneId'
-            ? String(msg.head.zoneId) : msg.head.openId;
+        const key = this.hashKey === 'gid'
+            ? String(msg.head.gid ?? 0)
+            : this.hashKey === 'zoneId'
+                ? String(msg.head.zoneId ?? 0) : (msg.head.openId ?? '');
         return this.djb2(key) % workerCount;
     }
     onMessageSent(_i: number) {}
     onMessageResolved(_i: number) {}
 }
 
-// ---- 工厂 ----
+// ---- Factory ----
 
 export function createLoadBalancer(cfg: LbStrategyConfig, workerCount: number): ILoadBalancer {
     switch (cfg.strategy) {
