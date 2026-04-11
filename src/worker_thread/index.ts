@@ -16,24 +16,26 @@ export function regCmdHandler(cmdId: number, handler: HandlerType) {
     handlerMap[cmdId] = handler;
 }
 
-parentPort!.on('message', (msg: Msg) => {
-    if (msg.head.clcOptions) {
-        let cb = txnMgr.onCallback(msg.head.txnId!);
-        if (cb) {
-            cb(msg.body);
+export async function workerReady(initFn: () => Promise<void>) {
+    await initFn();
+    parentPort!.on('message', (msg: Msg) => {
+        if (msg.head.clcOptions) {
+            let cb = txnMgr.onCallback(msg.head.txnId!);
+            if (cb) {
+                cb(msg.body);
+            } else {
+                errorLog(`No callback for txnId ${msg.head.txnId}|${msg.head.cmdId}`);
+            }
         } else {
-            errorLog(`No callback for txnId ${msg.head.txnId}|${msg.head.cmdId}`);
+            const handler = handlerMap[msg.head.cmdId];
+            if (handler) {
+                handler(msg, msg.body);
+            } else {
+                errorLog(`No handler for cmdId ${msg.head.cmdId}`);
+            }
         }
-    } else {
-        const handler = handlerMap[msg.head.cmdId];
-        if (handler) {
-            handler(msg, msg.body);
-        } else {
-            errorLog(`No handler for cmdId ${msg.head.cmdId}`);
-        }
-    }
+    });
 }
-);
 
 export function respondCmd(reqMsg: Msg, innerRes: MsgBodyType) {
     reqMsg.body = innerRes;
