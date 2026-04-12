@@ -31,7 +31,14 @@ export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
         worker.postMessage(msg);
         core!.loadBalancer!.onMessageSent(workerIndex);
         core!.workerPendingTxns.get(worker)!.add(msg.head.txnId);
-        core!.txnMgr.addTxn(msg.head.txnId, resolve);
+        core!.txnMgr.addTxn(msg.head.txnId, resolve, () => {
+            core!.workerPendingTxns.get(worker)?.delete(msg.head.txnId!);
+            core!.loadBalancer!.onMessageResolved(workerIndex);
+            msg.head.errCode = -1;
+            msg.head.errMsg = `txn timeout|txnId:${msg.head.txnId}`;
+            msg.body = '';
+            resolve(msg);
+        });
     });
 }
 

@@ -41,7 +41,9 @@ export type MsgHeadType = {
     gid?: number,
     txnId?: number,
     clcOptions?: ClcOptions,
-    clOptions?: ClOptions
+    clOptions?: ClOptions,
+    errCode?: number,
+    errMsg?: string
 };
 
 /** Message body, either binary (Uint8Array) or text (string). */

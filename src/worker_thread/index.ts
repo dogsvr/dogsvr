@@ -17,6 +17,13 @@ export function regCmdHandler(cmdId: number, handler: HandlerType) {
 }
 
 export async function workerReady(initFn: () => Promise<void>) {
+    process.on('unhandledRejection', (err) => {
+        errorLog('unhandledRejection|err:', err);
+    });
+    process.on('uncaughtException', (err) => {
+        errorLog('uncaughtException|err:', err);
+    });
+
     await initFn();
     parentPort!.on('message', (msg: Msg) => {
         if (msg.head.clcOptions) {
@@ -29,7 +36,10 @@ export async function workerReady(initFn: () => Promise<void>) {
         } else {
             const handler = handlerMap[msg.head.cmdId];
             if (handler) {
-                handler(msg, msg.body);
+                handler(msg, msg.body).catch((err) => {
+                    errorLog(`Handler exception|cmdId:${msg.head.cmdId}|openId:${msg.head.openId ?? ''}|gid:${msg.head.gid ?? 0}|txnId:${msg.head.txnId ?? 0}|err:`, err);
+                    respondError(msg, -1, `Handler exception: ${err}`);
+                });
             } else {
                 errorLog(`No handler for cmdId ${msg.head.cmdId}`);
             }
@@ -42,7 +52,14 @@ export function respondCmd(reqMsg: Msg, innerRes: MsgBodyType) {
     parentPort!.postMessage(reqMsg);
 }
 
-export function callCmdByClc(clcName: string, msgHead: MsgHeadType, innerReq: MsgBodyType, noResponse?: boolean): Promise<MsgBodyType> | void {
+export function respondError(reqMsg: Msg, errCode: number, errMsg: string) {
+    reqMsg.head.errCode = errCode;
+    reqMsg.head.errMsg = errMsg;
+    reqMsg.body = '';
+    parentPort!.postMessage(reqMsg);
+}
+
+export function callCmdByClc(clcName: string, msgHead: MsgHeadType, innerReq: MsgBodyType, noResponse?: boolean): Promise<MsgBodyType | null> | void {
     if (noResponse) {
         msgHead.clcOptions = { clcName: clcName, noResponse: true };
         let msg = new Msg(msgHead, innerReq);
