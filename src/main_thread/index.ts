@@ -1,90 +1,59 @@
-import { Worker } from "worker_threads"
-import { BaseCL, BaseCLC } from "./conn_layer/base_cl";
-import { TxnMgr } from "../transaction";
+import { BaseCL } from "./base_cl";
 import { Msg } from "../message";
-import { traceLog, debugLog, infoLog, warnLog, errorLog } from "../logger";
-import { LbStrategyConfig, ILoadBalancer, createLoadBalancer } from './lb';
+import { infoLog, warnLog } from "../logger";
+import { SvrConfig, ServerCore, createServerCore } from "./server_core";
+import { createHotUpdateStrategy } from "./hot_update";
 import "./pm2"
 
-export interface SvrConfig {
-    workerThreadRunFile: string;
-    workerThreadNum: number;
-    clMap: { [clName: string]: BaseCL };
-    clcMap: { [clcName: string]: BaseCLC };
-    lbStrategy?: LbStrategyConfig;   // 不填默认 roundRobin
-}
-let svrCfg: SvrConfig | null = null;
+let core: ServerCore | null = null;
 
 export function getConnLayer(clName: string): BaseCL {
-    return svrCfg!.clMap[clName];
+    return core!.svrCfg.clMap[clName];
 }
 
 export async function startServer(cfg: SvrConfig) {
-    svrCfg = cfg;
-    loadBalancer = createLoadBalancer(
-        cfg.lbStrategy ?? { strategy: 'roundRobin' },
-        cfg.workerThreadNum
-    );
-    await startWorkerThreads();
-    for (let cl of Object.values(svrCfg!.clMap)) {
+    core = createServerCore(cfg);
+    core.resetLoadBalancer();
+    for (let i = 0; i < cfg.workerThreadNum; i++) {
+        core.workerThreads.push(core.createWorker(i));
+    }
+    for (const cl of Object.values(cfg.clMap)) {
         await cl.startListen();
     }
     infoLog("start dog server successfully");
 }
 
-let workerThreads: Worker[] = [];
-const txnMgr: TxnMgr = new TxnMgr();
-let loadBalancer: ILoadBalancer | null = null;
-
-async function startWorkerThreads() {
-    for (let i = 0; i < svrCfg!.workerThreadNum; ++i) {
-        const worker = new Worker(svrCfg!.workerThreadRunFile);
-        const workerIndex = i;
-        workerThreads.push(worker);
-        worker.on("message", (msg: Msg) => {
-            if (msg.head.clcOptions) {
-                svrCfg!.clcMap[msg.head.clcOptions.clcName].callCmd(msg, msg.head.clcOptions.noResponse ? undefined : worker);
-            }
-            else if (msg.head.clOptions) {
-                svrCfg!.clMap[msg.head.clOptions.clName].pushMsg(msg);
-            }
-            else {
-                let cb = txnMgr.onCallback(msg.head.txnId!);
-                if (cb) {
-                    loadBalancer!.onMessageResolved(workerIndex);
-                    cb(msg);
-                } else {
-                    errorLog(`No callback for txnId ${msg.head.txnId}|${msg.head.cmdId}`);
-                }
-            }
-        });
-    }
-}
-
 export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
     return new Promise((resolve) => {
-        msg.head.txnId = txnMgr.genNewTxnId();
-        const workerIndex = loadBalancer!.selectWorkerIndex(msg, workerThreads.length);
-        const worker = workerThreads[workerIndex];
+        msg.head.txnId = core!.txnMgr.genNewTxnId();
+        const workerIndex = core!.loadBalancer!.selectWorkerIndex(msg, core!.workerThreads.length);
+        const worker = core!.workerThreads[workerIndex];
         worker.postMessage(msg);
-        loadBalancer!.onMessageSent(workerIndex);
-        txnMgr.addTxn(msg.head.txnId, resolve);
+        core!.loadBalancer!.onMessageSent(workerIndex);
+        core!.workerPendingTxns.get(worker)!.add(msg.head.txnId);
+        core!.txnMgr.addTxn(msg.head.txnId, resolve);
     });
 }
 
-// TODO: gracefully exit
+// ---- Hot update entry point ----
+
+let isHotUpdating = false;
+
 export async function hotUpdate() {
-    for (let i = 0; i < workerThreads.length; ++i) {
-        workerThreads[i].terminate();
+    if (isHotUpdating) {
+        warnLog("hotUpdate called while already updating, ignoring");
+        return;
     }
-    workerThreads = [];
-    loadBalancer = createLoadBalancer(
-        svrCfg!.lbStrategy ?? { strategy: 'roundRobin' },
-        svrCfg!.workerThreadNum
-    );
-    await startWorkerThreads();
+    isHotUpdating = true;
+    try {
+        const strategy = createHotUpdateStrategy(core!.svrCfg.hotUpdateStrategy);
+        await strategy.execute(core!);
+    } finally {
+        isHotUpdating = false;
+    }
 }
 
-export * from "./conn_layer/base_cl";
+export * from "./base_cl";
+export { SvrConfig } from "./server_core";
 export * from "../logger";
 export * from "../message";

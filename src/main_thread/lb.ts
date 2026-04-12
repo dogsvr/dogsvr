@@ -19,6 +19,7 @@ export interface ILoadBalancer {
     selectWorkerIndex(msg: Msg, workerCount: number): number;
     onMessageSent(workerIndex: number): void;
     onMessageResolved(workerIndex: number): void;
+    resetIndex(workerIndex: number): void;
 }
 
 // ---- Round Robin ----
@@ -31,6 +32,7 @@ export class RoundRobinLB implements ILoadBalancer {
     }
     onMessageSent(_i: number) {}
     onMessageResolved(_i: number) {}
+    resetIndex(_i: number) {}
 }
 
 // ---- Random ----
@@ -41,6 +43,7 @@ export class RandomLB implements ILoadBalancer {
     }
     onMessageSent(_i: number) {}
     onMessageResolved(_i: number) {}
+    resetIndex(_i: number) {}
 }
 
 // ---- Least Load (counting on main thread, no cross-thread communication needed) ----
@@ -55,6 +58,7 @@ export class LeastLoadLB implements ILoadBalancer {
     }
     onMessageSent(i: number)     { this.pending[i]++; }
     onMessageResolved(i: number) { if (this.pending[i] > 0) this.pending[i]--; }
+    resetIndex(i: number)        { this.pending[i] = 0; }
 }
 
 // ---- Consistent Hash (djb2, pure TS implementation, no external dependencies) ----
@@ -79,6 +83,7 @@ export class ConsistentHashLB implements ILoadBalancer {
     }
     onMessageSent(_i: number) {}
     onMessageResolved(_i: number) {}
+    resetIndex(_i: number) {}
 }
 
 // ---- Factory ----
