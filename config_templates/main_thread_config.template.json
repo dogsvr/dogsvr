@@ -1,0 +1,13 @@
+{
+    "workerThreadRunFile": "./your_logic.js",
+    "workerThreadNum": 2,
+    "workerConfigPath": "./worker_thread_config.json",
+    "logLevel": "info",
+    "cl": {
+        "your_cl_name": { "type": "tsrpc", "svrType": "http", "port": 10000 }
+    },
+    "clc": {},
+    "lbStrategy": { "strategy": "roundRobin" },
+    "hotUpdateTimeout": 30000,
+    "hotUpdateStrategy": { "strategy": "rolling" }
+}

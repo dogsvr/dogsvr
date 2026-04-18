@@ -1,8 +1,9 @@
-import { BaseCL } from "./base_cl";
+import { BaseCL } from "./cl_base";
 import { Msg } from "../message";
 import { infoLog, warnLog } from "../logger";
 import { SvrConfig, ServerCore, createServerCore } from "./server_core";
 import { createHotUpdateStrategy } from "./hot_update";
+import { loadMainThreadConfig } from "./config";
 import "./pm2"
 
 let core: ServerCore | null = null;
@@ -11,7 +12,15 @@ export function getConnLayer(clName: string): BaseCL {
     return core!.svrCfg.clMap[clName];
 }
 
-export async function startServer(cfg: SvrConfig) {
+export async function startServer(cfg: SvrConfig): Promise<void>;
+export async function startServer(configPath: string): Promise<void>;
+export async function startServer(cfgOrPath: SvrConfig | string): Promise<void> {
+    let cfg: SvrConfig;
+    if (typeof cfgOrPath === 'string') {
+        cfg = loadMainThreadConfig(cfgOrPath);
+    } else {
+        cfg = cfgOrPath;
+    }
     core = createServerCore(cfg);
     core.resetLoadBalancer();
     for (let i = 0; i < cfg.workerThreadNum; i++) {
@@ -60,7 +69,9 @@ export async function hotUpdate() {
     }
 }
 
-export * from "./base_cl";
+export * from "./cl_base";
 export { SvrConfig } from "./server_core";
 export * from "../logger";
 export * from "../message";
+export { registerCLFactory, registerCLCFactory } from "./cl_factory";
+export { loadMainThreadConfig, getMainThreadConfig, getConfigDir, MainThreadJsonConfig } from "./config";

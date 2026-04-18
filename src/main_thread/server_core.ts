@@ -1,5 +1,5 @@
 import { Worker } from "worker_threads";
-import { BaseCL, BaseCLC } from "./base_cl";
+import { BaseCL, BaseCLC } from "./cl_base";
 import { TxnMgr } from "../transaction";
 import { Msg } from "../message";
 import { LbStrategyConfig, ILoadBalancer, createLoadBalancer } from "./lb";
@@ -18,9 +18,10 @@ export interface SvrConfig {
     workerThreadNum: number;
     clMap: { [clName: string]: BaseCL };
     clcMap: { [clcName: string]: BaseCLC };
-    lbStrategy?: LbStrategyConfig;                // 不填默认 roundRobin
-    hotUpdateTimeout?: number;                    // worker 优雅退出超时(ms)，默认 30000
-    hotUpdateStrategy?: HotUpdateStrategyConfig;  // 默认 'rolling'
+    lbStrategy?: LbStrategyConfig;                // defaults to roundRobin if omitted
+    hotUpdateTimeout?: number;                    // worker graceful shutdown timeout (ms), defaults to 30000
+    hotUpdateStrategy?: HotUpdateStrategyConfig;  // defaults to 'rolling'
+    workerConfigPath?: string;                    // config file path for worker threads
 }
 
 // ---- ServerCore ----
@@ -32,9 +33,9 @@ export interface ServerCore {
     loadBalancer: ILoadBalancer | null;
     workerPendingTxns: Map<Worker, Set<number>>;
 
-    /** 创建新 worker 并注册 message handler，不放入 workerThreads 数组 */
+    /** Create a new worker and register its message handler; does not add it to the workerThreads array */
     createWorker(index: number): Worker;
-    /** 重建 loadBalancer（全量重置） */
+    /** Rebuild the loadBalancer (full reset) */
     resetLoadBalancer(): void;
 }
 
@@ -47,7 +48,9 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
         workerPendingTxns: new Map(),
 
         createWorker(index: number): Worker {
-            const worker = new Worker(core.svrCfg.workerThreadRunFile);
+            const worker = new Worker(core.svrCfg.workerThreadRunFile, {
+                workerData: { workerConfigPath: core.svrCfg.workerConfigPath }
+            });
             core.workerPendingTxns.set(worker, new Set());
             worker.on("message", (msg: Msg) => {
                 if (msg.head.clcOptions) {

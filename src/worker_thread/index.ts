@@ -84,3 +84,4 @@ export function pushMsgByCl(clName: string, gids: number[], msgHead: MsgHeadType
 
 export * from "../message"
 export * from "../logger"
+export { loadWorkerThreadConfig, getThreadConfig, WorkerThreadBaseConfig } from "./config"
