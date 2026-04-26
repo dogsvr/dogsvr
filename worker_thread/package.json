@@ -1,0 +1,6 @@
+{
+    "_comment": "Stub for legacy module resolution (moduleResolution: node, old Node). Modern resolvers use the exports field in the root package.json.",
+    "name": "@dogsvr/dogsvr/worker_thread",
+    "main": "../dist/worker_thread/index.js",
+    "types": "../dist/worker_thread/index.d.ts"
+}
