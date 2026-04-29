@@ -50,6 +50,18 @@ export type MsgHeadType = {
 export type MsgBodyType = Uint8Array | string;
 
 /**
+ * Thrown inside a worker-thread handler to produce a typed error response.
+ * The framework catches this and calls respondError(reqMsg, code, msg).
+ * Any other thrown value falls through to the generic errCode=-1 path.
+ */
+export class HandlerError extends Error {
+    constructor(public code: number, public msg: string) {
+        super(msg);
+        this.name = 'HandlerError';
+    }
+}
+
+/**
  * Msg is the internal message envelope used within dogsvr, primarily for
  * communication between the main thread and worker threads via postMessage.
  * Connection layers convert their own CS/SS formats into Msg at the boundary.

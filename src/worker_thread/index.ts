@@ -1,9 +1,13 @@
 import { parentPort } from 'worker_threads';
 import { errorLog } from '../logger';
-import { Msg, MsgHeadType, MsgBodyType } from '../message';
+import { Msg, MsgHeadType, MsgBodyType, HandlerError } from '../message';
 import { TxnMgr } from "../transaction";
 
-export type HandlerType = (reqMsg: Msg, innerReq: MsgBodyType) => Promise<void>;
+export type HandlerRsp =
+    | MsgBodyType                                          // body only
+    | { body: MsgBodyType, head?: Partial<MsgHeadType> }   // body + head patch
+    | void;                                                 // silent drop
+export type HandlerType = (reqMsg: Msg) => Promise<HandlerRsp>;
 type HandlerMapType = { [key: number]: HandlerType }
 const handlerMap: HandlerMapType = {};
 const txnMgr: TxnMgr = new TxnMgr();
@@ -36,10 +40,24 @@ export async function workerReady(initFn: () => Promise<void>) {
         } else {
             const handler = handlerMap[msg.head.cmdId];
             if (handler) {
-                handler(msg, msg.body).catch((err) => {
-                    errorLog(`Handler exception|cmdId:${msg.head.cmdId}|openId:${msg.head.openId ?? ''}|gid:${msg.head.gid ?? 0}|txnId:${msg.head.txnId ?? 0}|err:`, err);
-                    respondError(msg, -1, `Handler exception: ${err}`);
-                });
+                handler(msg)
+                    .then((ret) => {
+                        if (ret === undefined) return;   // 严格 undefined 比较,空字符串是合法 body
+                        if (typeof ret === 'string' || ret instanceof Uint8Array) {
+                            respondCmd(msg, ret);
+                        } else {
+                            if (ret.head) Object.assign(msg.head, ret.head);
+                            respondCmd(msg, ret.body);
+                        }
+                    })
+                    .catch((err) => {
+                        if (err instanceof HandlerError) {
+                            respondError(msg, err.code, err.msg);
+                            return;
+                        }
+                        errorLog(`Handler exception|cmdId:${msg.head.cmdId}|openId:${msg.head.openId ?? ''}|gid:${msg.head.gid ?? 0}|txnId:${msg.head.txnId ?? 0}|err:`, err);
+                        respondError(msg, -1, `Handler exception: ${err}`);
+                    });
             } else {
                 errorLog(`No handler for cmdId ${msg.head.cmdId}`);
             }
