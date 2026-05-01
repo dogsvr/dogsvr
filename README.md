@@ -2,16 +2,24 @@
 
 Node.js game server framework built around a **main thread + worker thread** model: the main thread owns connections and routes messages, worker threads run business logic in parallel. Worker code is **hot-updatable**; connection layers are **pluggable**; message serialization is whatever you want (`Uint8Array` or `string`).
 
-Part of the dogsvr polyrepo. Sibling packages ship separately:
+This package is the **entry point of the dogsvr polyrepo** — if you're new here, start with this README for the framework, then walk through [`example-proj`](https://github.com/dogsvr/example-proj) for a runnable three-server reference.
 
-| Package | Purpose |
+## Ecosystem — the dogsvr polyrepo
+
+The dogsvr stack is intentionally split into small, independently versioned git repos. Each repo publishes at most one or two npm packages; no monorepo, no workspaces.
+
+| Repo / package | Role |
 |---|---|
-| [`@dogsvr/cl-tsrpc`](https://github.com/dogsvr/cl-tsrpc) | TSRPC connection layer (WebSocket / HTTP); also does per-conn auth + identity binding |
-| [`@dogsvr/cl-grpc`](https://github.com/dogsvr/cl-grpc) | gRPC connection layer for server-to-server calls |
-| [`@dogsvr/cfg-luban`](https://github.com/dogsvr/cfg-luban) | Runtime for reading Luban-generated game config (LMDB + FlatBuffers) |
-| [`@dogsvr/cfg-luban-cli`](https://github.com/dogsvr/cfg-luban-cli) | Codegen CLI for the above |
+| [`@dogsvr/dogsvr`](https://github.com/dogsvr/dogsvr) | **Framework core** — main thread, worker threads, load balancer, hot update, txn mgr |
+| [`@dogsvr/cl-tsrpc`](https://github.com/dogsvr/cl-tsrpc) | TSRPC connection layer (WebSocket / HTTP) with per-connection auth + identity binding (`openId` / `zoneId` / `gid`) |
+| [`@dogsvr/cl-grpc`](https://github.com/dogsvr/cl-grpc) | gRPC connection layer for server-to-server unary calls |
+| [`@dogsvr/cfg-luban`](https://github.com/dogsvr/cfg-luban) | Runtime for reading Luban-generated game config (LMDB + FlatBuffers, zero-copy) |
+| [`@dogsvr/cfg-luban-cli`](https://github.com/dogsvr/cfg-luban-cli) | Codegen CLI: Excel → FlatBuffers → LMDB pipeline |
+| [`example-proj`](https://github.com/dogsvr/example-proj) | **Reference integration** — three servers (dir / zonesvr / battlesvr), Redis + MongoDB, Colyseus rooms |
+| [`example-proj-cfg`](https://github.com/dogsvr/example-proj-cfg) | Reference business config repo that feeds `cfg-luban-cli` |
+| [`example-proj-client`](https://github.com/dogsvr/example-proj-client) | Reference Phaser 3 web client for `example-proj` |
 
-See [`example-proj`](https://github.com/dogsvr/example-proj) for a three-server reference integration (dir / zonesvr / battlesvr).
+You pick which `@dogsvr/cl-*` packages to install; you pick whether to use `@dogsvr/cfg-luban`; the framework core only requires one of them to be imported at startup to self-register a CL factory. See [Architecture](#architecture) below for how they fit together at runtime.
 
 ## Features
 
@@ -19,13 +27,10 @@ See [`example-proj`](https://github.com/dogsvr/example-proj) for a three-server 
 - **Pluggable connection layers (CL)** — import any `@dogsvr/cl-*` package to self-register a factory; main thread wires inbound/outbound connections from JSON config. Roll your own CL by extending `BaseCL` / `BaseCLC`.
 - **No serialization opinions** — `Msg.body` is `Uint8Array | string`. Protobuf, JSON, MsgPack, FlatBuffers — it's your call.
 - **Hot update of worker logic** — drain in-flight txns and replace workers without dropping connections. Two strategies: `rolling` (one at a time, default) or `allAtOnce` (all new, then drain old). Triggered via pm2 `tx2` action.
-- **Request/response correlation built in** — `TxnMgr` tracks in-flight requests across the thread boundary with automatic 5s timeout (configurable).
-- **JSON-driven startup** — instead of hand-wiring a `SvrConfig` object, point `startServer()` at a config file path.
 
 ## Requirements
 
-- Node.js **≥ 12.17** (needs `worker_threads` + `exports` field support)
-- TypeScript **any version** works — package ships types for both modern (`node16`/`bundler`) and legacy (`node`) module resolution (see [package resolution compatibility](#package-resolution-compatibility))
+**Node.js**: tested on **v16.15.1 on Linux (x86-64)**. Newer LTS versions (18 / 20 / 22) are expected to work but are not routinely exercised; older versions may not. File an issue if something breaks on your runtime.
 
 ## Install
 
@@ -107,30 +112,11 @@ Worker-thread surface (`workerReady`, `regCmdHandler`, `respondCmd`, `respondErr
 
 ## Architecture
 
-```
-     Client
-       │
-       ▼
-   ┌───────────────┐       (pluggable CL: @dogsvr/cl-tsrpc, cl-grpc, or your own)
-   │ Main thread   │
-   │  - CL inbound │
-   │  - CLC out    │       (to other servers)
-   │  - routing    │
-   │  - LB select  │
-   │  - hotUpdate  │
-   └───────┬───────┘
-           │  postMessage(Msg)       (load-balanced)
-   ┌───────┴───────┬──────────┬──────────┐
-   ▼               ▼          ▼          ▼
-  Worker 0      Worker 1    Worker 2    Worker N-1
-  (regCmdHandler + respondCmd / callCmdByClc / pushMsgByCl)
-```
+![architecture diagram](https://github.com/user-attachments/assets/8903ee30-36c6-4922-a5d9-5a0715c1ded4)
 
 - **Main thread** (`src/main_thread/`) owns the event loop for connections and dispatches messages to workers by command ID + routing fields (`gid` for consistent-hash LB).
 - **Worker threads** (`src/worker_thread/`) run your registered handlers. Workers never talk directly — cross-worker comms go through CLC callbacks routed by main.
 - **Messages** (`src/message.ts`): `Msg { head: MsgHeadType, body: MsgBodyType }`. Head carries `cmdId`, routing fields (`openId`/`zoneId`/`gid`), txn id, direction flags (`clcOptions` / `clOptions`), and error info. Body is raw bytes or string.
-
-![architecture diagram](https://github.com/user-attachments/assets/8903ee30-36c6-4922-a5d9-5a0715c1ded4)
 
 ## Package resolution compatibility
 
@@ -138,8 +124,8 @@ Worker-thread surface (`workerReady`, `regCmdHandler`, `respondCmd`, `respondErr
 
 | Resolver | Reads `exports`? | Reads stub `package.json`? | Result |
 |---|:-:|:-:|---|
-| Node.js 12.17+ | ✓ | — | Hits `dist/…` via `exports` |
-| Node.js < 12.17 (legacy) | ✗ | ✓ | Hits `dist/…` via stub's `main` |
+| Node.js (modern) | ✓ | — | Hits `dist/…` via `exports` |
+| Node.js (legacy, pre-exports) | ✗ | ✓ | Hits `dist/…` via stub's `main` |
 | TypeScript `moduleResolution: bundler` / `node16` / `nodenext` | ✓ | — | Hits `dist/….d.ts` via `exports.types` |
 | TypeScript `moduleResolution: node` (TS default) | ✗ | ✓ | Hits `dist/….d.ts` via stub's `types` |
 | Webpack / Rollup / Vite / Parcel / esbuild (modern) | ✓ | — | Hits `dist/…` via `exports` |
