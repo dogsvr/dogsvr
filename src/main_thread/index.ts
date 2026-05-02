@@ -4,6 +4,7 @@ import { infoLog, warnLog } from "../logger";
 import { SvrConfig, ServerCore, createServerCore } from "./server_core";
 import { createHotUpdateStrategy } from "./hot_update";
 import { loadMainThreadConfig } from "./config";
+import { logEnvInfo } from "../env_info";
 import "./pm2"
 
 let core: ServerCore | null = null;
@@ -15,6 +16,7 @@ export function getConnLayer(clName: string): BaseCL {
 export async function startServer(cfg: SvrConfig): Promise<void>;
 export async function startServer(configPath: string): Promise<void>;
 export async function startServer(cfgOrPath: SvrConfig | string): Promise<void> {
+    logEnvInfo();
     let cfg: SvrConfig;
     if (typeof cfgOrPath === 'string') {
         cfg = loadMainThreadConfig(cfgOrPath);

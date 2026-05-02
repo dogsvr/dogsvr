@@ -13,7 +13,7 @@ The dogsvr stack is intentionally split into small, independently versioned git 
 | [`@dogsvr/dogsvr`](https://github.com/dogsvr/dogsvr) | **Framework core** — main thread, worker threads, load balancer, hot update, txn mgr |
 | [`@dogsvr/cl-tsrpc`](https://github.com/dogsvr/cl-tsrpc) | TSRPC connection layer (WebSocket / HTTP) with per-connection auth + identity binding (`openId` / `zoneId` / `gid`) |
 | [`@dogsvr/cl-grpc`](https://github.com/dogsvr/cl-grpc) | gRPC connection layer for server-to-server unary calls |
-| [`@dogsvr/cfg-luban`](https://github.com/dogsvr/cfg-luban) | Runtime for reading Luban-generated game config (LMDB + FlatBuffers, zero-copy) |
+| [`@dogsvr/cfg-luban`](https://github.com/dogsvr/cfg-luban) | Runtime for reading Luban-generated game config — data lives in LMDB (mmap'd, outside the V8 heap), so all worker threads in the process share one pagecache-resident copy, and multiple Node processes on the same host share it via the OS pagecache too. FlatBuffers provides offset-based random access, so no upfront parse and no GC pressure from config tables |
 | [`@dogsvr/cfg-luban-cli`](https://github.com/dogsvr/cfg-luban-cli) | Codegen CLI: Excel → FlatBuffers → LMDB pipeline |
 | [`example-proj`](https://github.com/dogsvr/example-proj) | **Reference integration** — three servers (dir / zonesvr / battlesvr), Redis + MongoDB, Colyseus rooms |
 | [`example-proj-cfg`](https://github.com/dogsvr/example-proj-cfg) | Reference business config repo that feeds `cfg-luban-cli` |
@@ -80,11 +80,22 @@ dogsvr.workerReady(async () => {
     // one-time init: open DBs, load config, etc.
 });
 
-dogsvr.regCmdHandler(10001, async (reqMsg: dogsvr.Msg, body: dogsvr.MsgBodyType) => {
-    const req = JSON.parse(body as string);
-    dogsvr.respondCmd(reqMsg, JSON.stringify({ res: 'I am dog' }));
+dogsvr.regCmdHandler(10001, async (reqMsg) => {
+    const req = JSON.parse(reqMsg.body as string);
+    if (!req.name) {
+        // non-zero errCode path — framework sends an error response
+        throw new dogsvr.HandlerError(1001, 'name is required');
+    }
+    // return a body (string | Uint8Array) and the framework responds for you
+    return JSON.stringify({ res: `hello, ${req.name}` });
+
+    // other valid returns:
+    //   return { body: '...', head: { serverVersion: '1.2.3' } };   // with head patch
+    //   return;                                                      // undefined → silent drop (no response)
 });
 ```
+
+`respondCmd` / `respondError` are still exported as escape hatches for advanced cases (e.g. responding to a request from a different async context), but the return-value / throw form above is the canonical handler shape.
 
 ### Run
 
