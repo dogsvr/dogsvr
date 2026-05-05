@@ -17,7 +17,7 @@ The dogsvr stack is intentionally split into small, independently versioned git 
 | [`@dogsvr/cfg-luban-cli`](https://github.com/dogsvr/cfg-luban-cli) | Codegen CLI: Excel → FlatBuffers → LMDB pipeline |
 | [`example-proj`](https://github.com/dogsvr/example-proj) | **Reference integration** — three servers (dir / zonesvr / battlesvr), Redis + MongoDB, Colyseus rooms |
 | [`example-proj-cfg`](https://github.com/dogsvr/example-proj-cfg) | Reference business config repo that feeds `cfg-luban-cli` |
-| [`example-proj-client`](https://github.com/dogsvr/example-proj-client) | Reference Phaser 3 web client for `example-proj` |
+| [`example-proj-client`](https://github.com/dogsvr/example-proj-client) | Reference Phaser 4 web client for `example-proj` |
 
 You pick which `@dogsvr/cl-*` packages to install; you pick whether to use `@dogsvr/cfg-luban`; the framework core only requires one of them to be imported at startup to self-register a CL factory. See [Architecture](#architecture) below for how they fit together at runtime.
 
