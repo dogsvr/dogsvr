@@ -1,11 +1,13 @@
 import { BaseCL } from "./cl_base";
-import { Msg } from "../message";
-import { infoLog, warnLog } from "../logger";
+import { Msg } from "../common/message";
+import { log as rootLog } from "./logger";
 import { SvrConfig, ServerCore, createServerCore } from "./server_core";
 import { createHotUpdateStrategy } from "./hot_update";
 import { loadMainThreadConfig } from "./config";
-import { logEnvInfo } from "../env_info";
+import { logEnvInfo } from "./env_info";
 import "./pm2"
+
+const log = rootLog.child({ module: "main_thread/index" });
 
 let core: ServerCore | null = null;
 
@@ -31,7 +33,7 @@ export async function startServer(cfgOrPath: SvrConfig | string): Promise<void> 
     for (const cl of Object.values(cfg.clMap)) {
         await cl.startListen();
     }
-    infoLog("start dog server successfully");
+    log.info("start dog server successfully");
 }
 
 export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
@@ -53,13 +55,11 @@ export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
     });
 }
 
-// ---- Hot update entry point ----
-
 let isHotUpdating = false;
 
 export async function hotUpdate() {
     if (isHotUpdating) {
-        warnLog("hotUpdate called while already updating, ignoring");
+        log.warn("hotUpdate called while already updating, ignoring");
         return;
     }
     isHotUpdating = true;
@@ -73,7 +73,8 @@ export async function hotUpdate() {
 
 export * from "./cl_base";
 export { SvrConfig } from "./server_core";
-export * from "../logger";
-export * from "../message";
+export * from "../common/message";
 export { registerCLFactory, registerCLCFactory } from "./cl_factory";
 export { loadMainThreadConfig, getMainThreadConfig, getConfigDir, MainThreadJsonConfig } from "./config";
+export { log, registerLogger, type LoggerHub, type WorkerInitPayload } from "./logger";
+export type { Log, LoggerImpl, Level } from "../common/logger_types";

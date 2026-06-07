@@ -1,4 +1,4 @@
-import { errorLog } from "./logger";
+import type { Log } from "./logger_types";
 
 class Txn {
     txnId: number;
@@ -19,8 +19,10 @@ export class TxnMgr {
     currTxnId = 0;
     readonly maxTxnId = 4200000000;
     readonly defaultTimeoutMs: number;
+    private readonly log: Log;
 
-    constructor(defaultTimeoutMs: number = 5000) {
+    constructor(log: Log, defaultTimeoutMs: number = 5000) {
+        this.log = log;
         this.defaultTimeoutMs = defaultTimeoutMs;
     }
 
@@ -33,14 +35,14 @@ export class TxnMgr {
 
     addTxn(txnId: number, callback: Function, onTimeout?: Function, timeoutMs?: number) {
         if (this.txnMap[txnId]) {
-            errorLog('txn already exists', txnId);
+            this.log.error({ txnId }, "txn already exists");
             return;
         }
         const ms = timeoutMs ?? this.defaultTimeoutMs;
         const timer = setTimeout(() => {
             if (this.txnMap[txnId]) {
                 delete this.txnMap[txnId];
-                errorLog(`txn timeout|txnId:${txnId}|timeoutMs:${ms}`);
+                this.log.error({ txnId, timeoutMs: ms }, "txn timeout");
                 if (onTimeout) {
                     onTimeout();
                 } else {

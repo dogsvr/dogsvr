@@ -1,7 +1,9 @@
 import { parentPort } from 'worker_threads';
-import { errorLog } from '../logger';
-import { Msg, MsgHeadType, MsgBodyType, HandlerError } from '../message';
-import { TxnMgr } from "../transaction";
+import { log as rootLog } from "./logger";
+import { Msg, MsgHeadType, MsgBodyType, HandlerError } from '../common/message';
+import { TxnMgr } from "../common/transaction";
+
+const log = rootLog.child({ module: "worker_thread/index" });
 
 export type HandlerRsp =
     | MsgBodyType                                          // body only
@@ -10,11 +12,11 @@ export type HandlerRsp =
 export type HandlerType = (reqMsg: Msg) => Promise<HandlerRsp>;
 type HandlerMapType = { [key: number]: HandlerType }
 const handlerMap: HandlerMapType = {};
-const txnMgr: TxnMgr = new TxnMgr();
+const txnMgr: TxnMgr = new TxnMgr(rootLog.child({ module: "worker_thread/txnMgr" }));
 
 export function regCmdHandler(cmdId: number, handler: HandlerType) {
     if (handlerMap[cmdId]) {
-        errorLog(`Handler for cmdId ${cmdId} already exists`);
+        log.error({ cmdId }, "handler for cmdId already exists");
         return;
     }
     handlerMap[cmdId] = handler;
@@ -22,10 +24,10 @@ export function regCmdHandler(cmdId: number, handler: HandlerType) {
 
 export async function workerReady(initFn: () => Promise<void>) {
     process.on('unhandledRejection', (err) => {
-        errorLog('unhandledRejection|err:', err);
+        log.error({ err }, "unhandledRejection");
     });
     process.on('uncaughtException', (err) => {
-        errorLog('uncaughtException|err:', err);
+        log.error({ err }, "uncaughtException");
     });
 
     await initFn();
@@ -35,14 +37,14 @@ export async function workerReady(initFn: () => Promise<void>) {
             if (cb) {
                 cb(msg.body);
             } else {
-                errorLog(`No callback for txnId ${msg.head.txnId}|${msg.head.cmdId}`);
+                log.error({ txnId: msg.head.txnId, cmdId: msg.head.cmdId }, "no callback for txnId");
             }
         } else {
             const handler = handlerMap[msg.head.cmdId];
             if (handler) {
                 handler(msg)
                     .then((ret) => {
-                        if (ret === undefined) return;   // 严格 undefined 比较,空字符串是合法 body
+                        if (ret === undefined) return;   // strict undefined check; empty string is a valid body
                         if (typeof ret === 'string' || ret instanceof Uint8Array) {
                             respondCmd(msg, ret);
                         } else {
@@ -55,11 +57,17 @@ export async function workerReady(initFn: () => Promise<void>) {
                             respondError(msg, err.code, err.msg);
                             return;
                         }
-                        errorLog(`Handler exception|cmdId:${msg.head.cmdId}|openId:${msg.head.openId ?? ''}|gid:${msg.head.gid ?? 0}|txnId:${msg.head.txnId ?? 0}|err:`, err);
+                        log.error({
+                            err,
+                            cmdId: msg.head.cmdId,
+                            openId: msg.head.openId ?? '',
+                            gid: msg.head.gid ?? 0,
+                            txnId: msg.head.txnId ?? 0,
+                        }, "handler exception");
                         respondError(msg, -1, `Handler exception: ${err}`);
                     });
             } else {
-                errorLog(`No handler for cmdId ${msg.head.cmdId}`);
+                log.error({ cmdId: msg.head.cmdId }, "no handler for cmdId");
             }
         }
     });
@@ -100,6 +108,7 @@ export function pushMsgByCl(clName: string, gids: number[], msgHead: MsgHeadType
     parentPort!.postMessage(msg);
 }
 
-export * from "../message"
-export * from "../logger"
+export * from "../common/message"
 export { loadWorkerThreadConfig, getThreadConfig, WorkerThreadBaseConfig } from "./config"
+export { log, registerWorkerLogger } from "./logger";
+export type { Log, LoggerImpl, Level } from "../common/logger_types";

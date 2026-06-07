@@ -1,4 +1,4 @@
-import { Msg } from "../message";
+import { Msg } from "../common/message";
 
 // ---- Strategy config (discriminated union) ----
 
@@ -46,7 +46,7 @@ export class RandomLB implements ILoadBalancer {
     resetIndex(_i: number) {}
 }
 
-// ---- Least Load (counting on main thread, no cross-thread communication needed) ----
+// ---- Least Load ----
 
 export class LeastLoadLB implements ILoadBalancer {
     private pending: number[];
@@ -61,7 +61,7 @@ export class LeastLoadLB implements ILoadBalancer {
     resetIndex(i: number)        { this.pending[i] = 0; }
 }
 
-// ---- Consistent Hash (djb2, pure TS implementation, no external dependencies) ----
+// ---- Consistent Hash (djb2) ----
 
 export class ConsistentHashLB implements ILoadBalancer {
     private hashKey: 'openId' | 'zoneId' | 'gid';

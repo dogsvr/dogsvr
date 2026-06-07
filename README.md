@@ -10,7 +10,8 @@ The dogsvr stack is intentionally split into small, independently versioned git 
 
 | Repo / package | Role |
 |---|---|
-| [`@dogsvr/dogsvr`](https://github.com/dogsvr/dogsvr) | **Framework core** — main thread, worker threads, load balancer, hot update, txn mgr |
+| [`@dogsvr/dogsvr`](https://github.com/dogsvr/dogsvr) | **Framework core** — main thread, worker threads, load balancer, hot update, txn mgr, logger interface |
+| [`@dogsvr/logger`](https://github.com/dogsvr/logger) | Default pino-based NDJSON logger plugin (inline / central modes); registers itself when imported |
 | [`@dogsvr/cl-tsrpc`](https://github.com/dogsvr/cl-tsrpc) | TSRPC connection layer (WebSocket / HTTP) with per-connection auth + identity binding (`openId` / `zoneId` / `gid`) |
 | [`@dogsvr/cl-grpc`](https://github.com/dogsvr/cl-grpc) | gRPC connection layer for server-to-server unary calls |
 | [`@dogsvr/cfg-luban`](https://github.com/dogsvr/cfg-luban) | Runtime for reading Luban-generated game config — data lives in LMDB (mmap'd, outside the V8 heap), so all worker threads in the process share one pagecache-resident copy, and multiple Node processes on the same host share it via the OS pagecache too. FlatBuffers provides offset-based random access, so no upfront parse and no GC pressure from config tables |
@@ -19,14 +20,15 @@ The dogsvr stack is intentionally split into small, independently versioned git 
 | [`example-proj-cfg`](https://github.com/dogsvr/example-proj-cfg) | Reference business config repo that feeds `cfg-luban-cli` |
 | [`example-proj-client`](https://github.com/dogsvr/example-proj-client) | Reference Phaser 4 web client for `example-proj` |
 
-You pick which `@dogsvr/cl-*` packages to install; you pick whether to use `@dogsvr/cfg-luban`; the framework core only requires one of them to be imported at startup to self-register a CL factory. See [Architecture](#architecture) below for how they fit together at runtime.
+You pick which `@dogsvr/cl-*` packages to install; you pick whether to use `@dogsvr/cfg-luban`; you pick `@dogsvr/logger` (or supply your own `LoggerImpl`). The framework core only requires that any chosen plugin be imported at startup to self-register. See [Architecture](#architecture) below for how they fit together at runtime.
 
 ## Features
 
 - **Multi-thread via Node `worker_threads`** — main thread runs one event loop for connections; N worker threads run business handlers. Messages between them are routed by a pluggable load-balancer (round-robin, random, least-load, consistent-hash by `gid`).
 - **Pluggable connection layers (CL)** — import any `@dogsvr/cl-*` package to self-register a factory; main thread wires inbound/outbound connections from JSON config. Roll your own CL by extending `BaseCL` / `BaseCLC`.
+- **Pluggable logger** — `log`, `LoggerImpl`, `LoggerHub`, `Level` are defined here; the implementation registers itself via `registerLogger()` (main) / `registerWorkerLogger()` (worker). Default plugin is [`@dogsvr/logger`](https://github.com/dogsvr/logger) (pino-based NDJSON, two modes); without a plugin a built-in console fallback prints human-readable lines and warns once.
 - **No serialization opinions** — `Msg.body` is `Uint8Array | string`. Protobuf, JSON, MsgPack, FlatBuffers — it's your call.
-- **Hot update of worker logic** — drain in-flight txns and replace workers without dropping connections. Two strategies: `rolling` (one at a time, default) or `allAtOnce` (all new, then drain old). Triggered via pm2 `tx2` action.
+- **Hot update of worker logic** — drain in-flight txns and replace workers without dropping connections. Two strategies: `rolling` (one at a time, default) or `allAtOnce` (all new, then drain old). Triggered via `pm2 trigger <name> hotUpdate` over the native pm2 IPC channel (no `tx2` dependency).
 
 ## Requirements
 
@@ -36,6 +38,7 @@ You pick which `@dogsvr/cl-*` packages to install; you pick whether to use `@dog
 
 ```sh
 npm install @dogsvr/dogsvr
+npm install @dogsvr/logger     # NDJSON output via pino (recommended)
 npm install @dogsvr/cl-tsrpc   # pick your connection layer(s)
 npm install @dogsvr/cl-grpc    # or gRPC, or both
 ```
@@ -50,26 +53,32 @@ Minimum two files: one that boots the main thread, one that runs in each worker.
 
 ```ts
 import * as dogsvr from '@dogsvr/dogsvr/main_thread';
+import { setupLogger } from '@dogsvr/logger/main_thread';
 import '@dogsvr/cl-tsrpc';  // self-registers "tsrpc" CL factory
 import * as path from 'node:path';
 
-await dogsvr.startServer({
-    workerThreadRunFile: path.resolve(__dirname, 'worker.js'),
-    workerThreadNum: 2,
-    cl:  { "tsrpc":  { "type": "tsrpc", "svrType": "ws", "port": 20000 } },
-    clc: {},
-    lbStrategy: { strategy: 'roundRobin' },
-    hotUpdateStrategy: { strategy: 'rolling' },
-});
+const cfg = dogsvr.loadMainThreadConfig(path.resolve(__dirname, 'main_thread_config.json'));
+setupLogger({ mode: 'inline', level: 'info' });  // read from cfg.log in practice; see Logger section
+dogsvr.startServer(cfg);
 ```
 
-Or point to a JSON config file — the shape mirrors the `SvrConfig` object above (`workerThreadRunFile`, `workerThreadNum`, `cl`, `clc`, `lbStrategy`, `hotUpdateStrategy`, optional `workerConfigPath` / `logLevel` / `hotUpdateTimeout`):
+`main_thread_config.json` shape (mirrors `SvrConfig` + any business fields you read via `getMainThreadConfig<MyTypedConfig>()`):
 
-```ts
-import * as dogsvr from '@dogsvr/dogsvr/main_thread';
-import '@dogsvr/cl-tsrpc';
-dogsvr.startServer(__dirname + '/main_thread_config.json');
+```json
+{
+    "workerThreadRunFile": "./worker.js",
+    "workerThreadNum": 2,
+    "log": { "mode": "inline", "level": "info" },
+    "cl":  { "tsrpc": { "type": "tsrpc", "svrType": "ws", "port": 20000 } },
+    "clc": {}
+}
 ```
+
+Values like `workerThreadNum`, `port`, `mode`, and `level` are illustrative — tune them for your deployment.
+
+Optional fields: `lbStrategy`, `hotUpdateStrategy`, `workerConfigPath`, `hotUpdateTimeout`.
+
+You can also pass a `SvrConfig` object directly to `startServer()` if you prefer programmatic setup.
 
 ### `worker.ts` (runs in each worker thread)
 
@@ -77,25 +86,25 @@ dogsvr.startServer(__dirname + '/main_thread_config.json');
 import * as dogsvr from '@dogsvr/dogsvr/worker_thread';
 
 dogsvr.workerReady(async () => {
-    // one-time init: open DBs, load config, etc.
+    dogsvr.loadWorkerThreadConfig();
+    // one-time init: set up logger, open DBs, etc.
+    // See Logger section below for setupLoggerInWorker() wiring.
 });
 
 dogsvr.regCmdHandler(10001, async (reqMsg) => {
     const req = JSON.parse(reqMsg.body as string);
     if (!req.name) {
-        // non-zero errCode path — framework sends an error response
         throw new dogsvr.HandlerError(1001, 'name is required');
     }
-    // return a body (string | Uint8Array) and the framework responds for you
     return JSON.stringify({ res: `hello, ${req.name}` });
 
     // other valid returns:
     //   return { body: '...', head: { serverVersion: '1.2.3' } };   // with head patch
-    //   return;                                                      // undefined → silent drop (no response)
+    //   return;                                                      // undefined → silent drop
 });
 ```
 
-`respondCmd` / `respondError` are still exported as escape hatches for advanced cases (e.g. responding to a request from a different async context), but the return-value / throw form above is the canonical handler shape.
+`respondCmd` / `respondError` are still exported as escape hatches for responding from a different async context, but the return-value / throw form above is the canonical handler shape.
 
 ### Run
 
@@ -117,17 +126,54 @@ import * as dogsvr from '@dogsvr/dogsvr/worker_thread';  // worker-thread APIs
 
 Attempting `require('@dogsvr/dogsvr')` returns `ERR_PACKAGE_PATH_NOT_EXPORTED` — this is **intentional**, so that code running in a worker can never accidentally pull in `startServer` (which would recursively spawn more workers).
 
-Main-thread surface (`startServer`, `sendMsgToWorkerThread`, `hotUpdate`, `getConnLayer`, `BaseCL`, `BaseCLC`, `registerCLFactory`, `registerCLCFactory`, `loadMainThreadConfig`, `Msg`, log functions…) — see [`src/main_thread/index.ts`](src/main_thread/index.ts).
+Main-thread surface (`startServer`, `sendMsgToWorkerThread`, `hotUpdate`, `getConnLayer`, `BaseCL`, `BaseCLC`, `registerCLFactory`, `registerCLCFactory`, `loadMainThreadConfig`, `getMainThreadConfig`, `log`, `registerLogger`, `Msg`, …) — see [`src/main_thread/index.ts`](src/main_thread/index.ts).
 
-Worker-thread surface (`workerReady`, `regCmdHandler`, `respondCmd`, `respondError`, `callCmdByClc`, `pushMsgByCl`, `loadWorkerThreadConfig`, `getThreadConfig<T>`, `Msg`, log functions…) — see [`src/worker_thread/index.ts`](src/worker_thread/index.ts).
+Worker-thread surface (`workerReady`, `regCmdHandler`, `respondCmd`, `respondError`, `callCmdByClc`, `pushMsgByCl`, `loadWorkerThreadConfig`, `getThreadConfig<T>`, `log`, `registerWorkerLogger`, `Msg`, …) — see [`src/worker_thread/index.ts`](src/worker_thread/index.ts).
 
 ## Architecture
 
 ![architecture diagram](https://github.com/user-attachments/assets/8903ee30-36c6-4922-a5d9-5a0715c1ded4)
 
-- **Main thread** (`src/main_thread/`) owns the event loop for connections and dispatches messages to workers by command ID + routing fields (`gid` for consistent-hash LB).
-- **Worker threads** (`src/worker_thread/`) run your registered handlers. Workers never talk directly — cross-worker comms go through CLC callbacks routed by main.
-- **Messages** (`src/message.ts`): `Msg { head: MsgHeadType, body: MsgBodyType }`. Head carries `cmdId`, routing fields (`openId`/`zoneId`/`gid`), txn id, direction flags (`clcOptions` / `clOptions`), and error info. Body is raw bytes or string.
+- **Main thread** owns the event loop for connections and dispatches messages to workers by command ID + routing fields (`gid` for consistent-hash LB).
+- **Worker threads** run your registered handlers. Workers never talk directly — cross-worker comms go through CLC callbacks routed by main.
+- **Messages** (`Msg`): `head` carries `cmdId`, routing fields, txn id, direction flags (`clcOptions` / `clOptions`), and error info; `body` is raw bytes or string.
+
+## Logger
+
+`@dogsvr/dogsvr` defines the logger contract (`Log`, `LoggerImpl`, `LoggerHub`, `Level`) and exposes a `log` proxy from both subpaths — but ships only a console-based fallback. To get NDJSON output, install [`@dogsvr/logger`](https://github.com/dogsvr/logger) and call `setupLogger()` / `setupLoggerInWorker()` once at startup:
+
+```ts
+// main thread entry
+import * as dogsvr from '@dogsvr/dogsvr/main_thread';
+import { setupLogger } from '@dogsvr/logger/main_thread';
+
+const cfg = dogsvr.loadMainThreadConfig(...);
+setupLogger({ ...cfg.log, base: { svrId: 'mysvr' } });
+dogsvr.startServer(cfg);
+```
+
+```ts
+// worker thread entry
+import { workerData } from 'node:worker_threads';
+import * as dogsvr from '@dogsvr/dogsvr/worker_thread';
+import { setupLoggerInWorker, type WorkerInitPayload } from '@dogsvr/logger/worker_thread';
+
+dogsvr.workerReady(async () => {
+    dogsvr.loadWorkerThreadConfig();
+    const cfg = dogsvr.getThreadConfig<{ log: { level: dogsvr.Level } }>();
+    setupLoggerInWorker({
+        ...(workerData as { loggerInit: WorkerInitPayload }).loggerInit,
+        level: cfg.log.level,
+        base: { svrId: 'mysvr' },
+    });
+});
+```
+
+The main thread passes a `MessagePort` to each worker via `workerData.loggerInit` automatically — you just spread it. The `log` config key in your JSON configs is a business field (not read by the framework core); add it to your typed config interface and read it with `getMainThreadConfig<T>()` / `getThreadConfig<T>()` as shown above.
+
+To use a different backend, skip `@dogsvr/logger` and call `registerLogger(hub)` (main) / `registerWorkerLogger(impl)` (worker) yourself with your own `LoggerImpl`. Each `register*` is one-shot — calling twice throws.
+
+If no plugin registers, `log.*` calls fall back to the console logger, which emits a one-time `process.emitWarning`. Spawning workers before `setupLogger()` throws rather than silently misrouting log lines.
 
 ## Package resolution compatibility
 

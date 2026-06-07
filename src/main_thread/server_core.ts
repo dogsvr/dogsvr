@@ -1,9 +1,11 @@
-import { Worker } from "worker_threads";
+import { Worker, TransferListItem } from "worker_threads";
 import { BaseCL, BaseCLC } from "./cl_base";
-import { TxnMgr } from "../transaction";
-import { Msg } from "../message";
+import { TxnMgr } from "../common/transaction";
+import { Msg } from "../common/message";
 import { LbStrategyConfig, ILoadBalancer, createLoadBalancer } from "./lb";
-import { errorLog } from "../logger";
+import { log as rootLog, getLoggerHub } from "./logger";
+
+const log = rootLog.child({ module: "main_thread/server_core" });
 
 // ---- Hot update strategy config ----
 
@@ -18,7 +20,7 @@ export interface SvrConfig {
     workerThreadNum: number;
     clMap: { [clName: string]: BaseCL };
     clcMap: { [clcName: string]: BaseCLC };
-    lbStrategy?: LbStrategyConfig;                // defaults to roundRobin if omitted
+    lbStrategy?: LbStrategyConfig;                // defaults to roundRobin
     hotUpdateTimeout?: number;                    // worker graceful shutdown timeout (ms), defaults to 30000
     hotUpdateStrategy?: HotUpdateStrategyConfig;  // defaults to 'rolling'
     workerConfigPath?: string;                    // config file path for worker threads
@@ -33,7 +35,7 @@ export interface ServerCore {
     loadBalancer: ILoadBalancer | null;
     workerPendingTxns: Map<Worker, Set<number>>;
 
-    /** Create a new worker and register its message handler; does not add it to the workerThreads array */
+    /** Create a new worker and register its message handler; does not add to workerThreads */
     createWorker(index: number): Worker;
     /** Rebuild the loadBalancer (full reset) */
     resetLoadBalancer(): void;
@@ -43,15 +45,31 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
     const core: ServerCore = {
         svrCfg: cfg,
         workerThreads: [],
-        txnMgr: new TxnMgr(),
+        txnMgr: new TxnMgr(rootLog.child({ module: "main_thread/txnMgr" })),
         loadBalancer: null,
         workerPendingTxns: new Map(),
 
         createWorker(index: number): Worker {
+            // Inject logger port into workerData so the worker can call setupLoggerInWorker
+            // without re-deciding mode. Throws if no logger plugin is registered (fail fast).
+            const hub = getLoggerHub();
+            const loggerPort = hub.issueWorkerPort();
+            const loggerInit = hub.workerInitFor(loggerPort);
+            const workerData: Record<string, unknown> = {
+                workerConfigPath: core.svrCfg.workerConfigPath,
+                loggerInit,
+            };
+            const transferList: TransferListItem[] = [];
+            if (loggerPort) {
+                transferList.push(loggerPort);
+            }
             const worker = new Worker(core.svrCfg.workerThreadRunFile, {
-                workerData: { workerConfigPath: core.svrCfg.workerConfigPath }
+                workerData,
+                transferList,
             });
             core.workerPendingTxns.set(worker, new Set());
+            // Clean up port tracking when the worker exits (rolling hot-update relies on this).
+            worker.on("exit", () => hub.releaseWorkerPort(worker));
             worker.on("message", (msg: Msg) => {
                 if (msg.head.clcOptions) {
                     core.svrCfg.clcMap[msg.head.clcOptions.clcName].callCmd(
@@ -66,7 +84,7 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                         core.loadBalancer!.onMessageResolved(index);
                         cb(msg);
                     } else {
-                        errorLog(`No callback for txnId ${msg.head.txnId}|${msg.head.cmdId}`);
+                        log.error({ txnId: msg.head.txnId, cmdId: msg.head.cmdId }, "no callback for txnId");
                     }
                 }
             });

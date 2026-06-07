@@ -1,7 +1,9 @@
 import { Worker } from "worker_threads";
-import { Msg } from "../message";
-import { infoLog, warnLog } from "../logger";
+import { Msg } from "../common/message";
+import { log as rootLog } from "./logger";
 import { ServerCore, HotUpdateStrategyConfig } from "./server_core";
+
+const log = rootLog.child({ module: "main_thread/hot_update" });
 
 // ---- Strategy interface ----
 
@@ -24,7 +26,7 @@ function drainOldWorker(
             clearTimeout(timer);
             oldWorker.terminate();
             core.workerPendingTxns.delete(oldWorker);
-            infoLog(`Old worker ${oldIndex} stopped: ${reason}`);
+            log.info({ workerIndex: oldIndex, reason }, "old worker stopped");
             resolve();
         };
 
@@ -37,16 +39,15 @@ function drainOldWorker(
 
         const timer = setTimeout(() => {
             const pending = core.workerPendingTxns.get(oldWorker);
-            warnLog(
-                `Old worker ${oldIndex} drain timeout ` +
-                `(${pending?.size ?? 0} txns remaining), force terminating`
+            log.warn(
+                { workerIndex: oldIndex, remaining: pending?.size ?? 0 },
+                "old worker drain timeout, force terminating"
             );
             finish("timeout");
         }, timeout);
 
-        // Replace normal handler with drain-mode handler.
-        // The drain handler skips loadBalancer.onMessageResolved to avoid
-        // corrupting the LB state for new workers at this index.
+        // Drain-mode handler skips loadBalancer.onMessageResolved to avoid
+        // corrupting LB state for new workers at this index.
         oldWorker.removeAllListeners("message");
         oldWorker.on("message", (msg: Msg) => {
             if (msg.head.clcOptions) {
@@ -65,7 +66,7 @@ function drainOldWorker(
             }
         });
 
-        // Maybe already drained (0 in-flight txns)
+        // Maybe already drained
         checkDrained();
     });
 }
@@ -82,14 +83,13 @@ class RollingStrategy implements IHotUpdateStrategy {
             const newWorker = core.createWorker(i);
             core.workerThreads[i] = newWorker;
             core.loadBalancer!.resetIndex(i);
-            // New requests now route to newWorker at index i, pending count starts from 0
 
             await drainOldWorker(oldWorker, i, timeout, core);
 
-            infoLog(`Rolling hot update: worker ${i}/${workerCount} replaced`);
+            log.info({ workerIndex: i, total: workerCount }, "rolling hot update: worker replaced");
         }
 
-        infoLog("Rolling hot update complete: all workers replaced");
+        log.info("rolling hot update complete: all workers replaced");
     }
 }
 
@@ -107,16 +107,15 @@ class AllAtOnceStrategy implements IHotUpdateStrategy {
         }
         core.workerThreads = newWorkers;
         core.resetLoadBalancer();
-        // New requests now route to new workers
 
-        infoLog("Hot update: new workers serving traffic, old workers draining");
+        log.info("hot update: new workers serving traffic, old workers draining");
 
         // Drain old workers in background
         const drainPromises = oldWorkers.map(
             (w, i) => drainOldWorker(w, i, timeout, core)
         );
         Promise.all(drainPromises).then(() => {
-            infoLog("Hot update complete: all old workers terminated");
+            log.info("hot update complete: all old workers terminated");
         });
     }
 }
