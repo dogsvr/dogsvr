@@ -1,6 +1,6 @@
 {
   "name": "@dogsvr/dogsvr",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Game server framework with main/worker thread separation, hot-update, and pluggable connection layers.",
   "keywords": [
     "game-server",
