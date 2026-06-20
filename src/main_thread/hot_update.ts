@@ -2,16 +2,13 @@ import { Worker } from "worker_threads";
 import { Msg } from "../common/message";
 import { log as rootLog } from "./logger";
 import { ServerCore, HotUpdateStrategyConfig } from "./server_core";
+import { getMetricSink } from "./metrics";
 
 const log = rootLog.child({ module: "main_thread/hot_update" });
-
-// ---- Strategy interface ----
 
 export interface IHotUpdateStrategy {
     execute(core: ServerCore): Promise<void>;
 }
-
-// ---- Shared drain logic ----
 
 function drainOldWorker(
     oldWorker: Worker, oldIndex: number, timeout: number,
@@ -60,6 +57,7 @@ function drainOldWorker(
                 core.workerPendingTxns.get(oldWorker)?.delete(msg.head.txnId!);
                 const cb = core.txnMgr.onCallback(msg.head.txnId!);
                 if (cb) {
+                    getMetricSink().onCmdEnd(msg.head.txnId!, oldIndex, (msg.head.errCode ?? 0) === 0);
                     cb(msg);
                 }
                 checkDrained();
@@ -70,8 +68,6 @@ function drainOldWorker(
         checkDrained();
     });
 }
-
-// ---- Rolling strategy (default) ----
 
 class RollingStrategy implements IHotUpdateStrategy {
     async execute(core: ServerCore): Promise<void> {
@@ -93,14 +89,11 @@ class RollingStrategy implements IHotUpdateStrategy {
     }
 }
 
-// ---- AllAtOnce strategy ----
-
 class AllAtOnceStrategy implements IHotUpdateStrategy {
     async execute(core: ServerCore): Promise<void> {
         const timeout = core.svrCfg.hotUpdateTimeout ?? 30000;
         const oldWorkers = [...core.workerThreads];
 
-        // Create all new workers and replace array
         const newWorkers: Worker[] = [];
         for (let i = 0; i < core.svrCfg.workerThreadNum; i++) {
             newWorkers.push(core.createWorker(i));
@@ -110,7 +103,6 @@ class AllAtOnceStrategy implements IHotUpdateStrategy {
 
         log.info("hot update: new workers serving traffic, old workers draining");
 
-        // Drain old workers in background
         const drainPromises = oldWorkers.map(
             (w, i) => drainOldWorker(w, i, timeout, core)
         );
@@ -119,8 +111,6 @@ class AllAtOnceStrategy implements IHotUpdateStrategy {
         });
     }
 }
-
-// ---- Factory ----
 
 export function createHotUpdateStrategy(cfg?: HotUpdateStrategyConfig): IHotUpdateStrategy {
     switch (cfg?.strategy) {

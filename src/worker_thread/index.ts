@@ -1,5 +1,6 @@
 import { parentPort } from 'worker_threads';
 import { log as rootLog } from "./logger";
+import { getSpanSink } from "./tracing";
 import { Msg, MsgHeadType, MsgBodyType, HandlerError } from '../common/message';
 import { TxnMgr } from "../common/transaction";
 
@@ -42,9 +43,16 @@ export async function workerReady(initFn: () => Promise<void>) {
         } else {
             const handler = handlerMap[msg.head.cmdId];
             if (handler) {
-                handler(msg)
+                const sink = getSpanSink();
+                const parentCtx = msg.head._otel ? sink.extract(msg.head._otel) : null;
+                const span = sink.start(`worker.${msg.head.cmdId}`, parentCtx, {
+                    'rpc.cmd_id': msg.head.cmdId,
+                });
+                let ok = false;
+                sink.withActive(span, () => handler(msg)
                     .then((ret) => {
-                        if (ret === undefined) return;   // strict undefined check; empty string is a valid body
+                        ok = true;
+                        if (ret === undefined) return;   // empty string is a valid body
                         if (typeof ret === 'string' || ret instanceof Uint8Array) {
                             respondCmd(msg, ret);
                         } else {
@@ -53,6 +61,7 @@ export async function workerReady(initFn: () => Promise<void>) {
                         }
                     })
                     .catch((err) => {
+                        span.recordException(err);
                         if (err instanceof HandlerError) {
                             respondError(msg, err.code, err.msg);
                             return;
@@ -65,7 +74,10 @@ export async function workerReady(initFn: () => Promise<void>) {
                             txnId: msg.head.txnId ?? 0,
                         }, "handler exception");
                         respondError(msg, -1, `Handler exception: ${err}`);
-                    });
+                    })
+                    .finally(() => {
+                        span.end(ok);
+                    }));
             } else {
                 log.error({ cmdId: msg.head.cmdId }, "no handler for cmdId");
             }
@@ -112,3 +124,6 @@ export * from "../common/message"
 export { loadWorkerThreadConfig, getThreadConfig, WorkerThreadBaseConfig } from "./config"
 export { log, registerWorkerLogger } from "./logger";
 export type { Log, LoggerImpl, Level } from "../common/logger_types";
+export { setSpanSink, getSpanSink } from "./tracing";
+export type { SpanSink, SpanCtx, SpanHandle } from "../common/tracing_types";
+export { onShutdown } from "../common/shutdown";

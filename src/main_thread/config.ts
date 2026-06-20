@@ -3,10 +3,11 @@ import * as path from 'node:path';
 import { SvrConfig } from './server_core';
 import { LbStrategyConfig } from './lb';
 import { HotUpdateStrategyConfig } from './server_core';
+import { OtelConfig } from './otel_config';
 import { createCLFromConfig, createCLCFromConfig } from './cl_factory';
 import { BaseCL, BaseCLC } from './cl_base';
 
-/** Raw JSON structure for the main-thread config file. Business fields pass through via the index signature. */
+/** Raw JSON structure for the main-thread config file. */
 export interface MainThreadJsonConfig {
     workerThreadRunFile: string;
     workerThreadNum: number;
@@ -16,6 +17,7 @@ export interface MainThreadJsonConfig {
     lbStrategy?: LbStrategyConfig;
     hotUpdateTimeout?: number;
     hotUpdateStrategy?: HotUpdateStrategyConfig;
+    otel?: OtelConfig;
     [key: string]: any;
 }
 
@@ -28,7 +30,7 @@ export function getMainThreadConfig<T extends MainThreadJsonConfig = MainThreadJ
     return mainConfig as T;
 }
 
-/** Get the directory of the loaded config file. */
+/** Directory of the loaded config file. */
 export function getConfigDir(): string {
     return configDir;
 }
@@ -70,5 +72,6 @@ export function loadMainThreadConfig(configPath: string): SvrConfig {
         lbStrategy: raw.lbStrategy,
         hotUpdateTimeout: raw.hotUpdateTimeout,
         hotUpdateStrategy: raw.hotUpdateStrategy,
+        otel: raw.otel,
     };
 }

@@ -5,6 +5,8 @@ import { SvrConfig, ServerCore, createServerCore } from "./server_core";
 import { createHotUpdateStrategy } from "./hot_update";
 import { loadMainThreadConfig } from "./config";
 import { logEnvInfo } from "./env_info";
+import { getMetricSink } from "./metrics";
+import { getSpanSink } from "./tracing";
 import "./pm2"
 
 const log = rootLog.child({ module: "main_thread/index" });
@@ -33,7 +35,23 @@ export async function startServer(cfgOrPath: SvrConfig | string): Promise<void> 
     for (const cl of Object.values(cfg.clMap)) {
         await cl.startListen();
     }
+    startMetricsSampler(cfg);
     log.info("start dog server successfully");
+}
+
+function startMetricsSampler(cfg: SvrConfig): void {
+    if (!cfg.otel?.metrics?.enabled) return;
+    const intervalMs = cfg.otel.metrics.sampleIntervalMs ?? 1000;
+    setInterval(() => {
+        const c = core;
+        if (!c) return;
+        const sink = getMetricSink();
+        sink.observeTxnPending(Object.keys(c.txnMgr.txnMap).length);
+        const perWorker: number[] = c.workerThreads.map(w =>
+            c.workerPendingTxns.get(w)?.size ?? 0
+        );
+        sink.observeWorkerPending(perWorker);
+    }, intervalMs).unref();
 }
 
 export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
@@ -41,12 +59,19 @@ export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
         msg.head.txnId = core!.txnMgr.genNewTxnId();
         const workerIndex = core!.loadBalancer!.selectWorkerIndex(msg, core!.workerThreads.length);
         const worker = core!.workerThreads[workerIndex];
+        const span = getSpanSink().getCurrent();
+        if (span) {
+            msg.head._otel = {};
+            getSpanSink().inject(span, msg.head._otel);
+        }
         worker.postMessage(msg);
         core!.loadBalancer!.onMessageSent(workerIndex);
         core!.workerPendingTxns.get(worker)!.add(msg.head.txnId);
+        getMetricSink().onCmdStart(msg.head.txnId, String(msg.head.cmdId), workerIndex);
         core!.txnMgr.addTxn(msg.head.txnId, resolve, () => {
             core!.workerPendingTxns.get(worker)?.delete(msg.head.txnId!);
             core!.loadBalancer!.onMessageResolved(workerIndex);
+            getMetricSink().onTxnTimeout(msg.head.txnId!, workerIndex);
             msg.head.errCode = -1;
             msg.head.errMsg = `txn timeout|txnId:${msg.head.txnId}`;
             msg.body = '';
@@ -78,3 +103,8 @@ export { registerCLFactory, registerCLCFactory } from "./cl_factory";
 export { loadMainThreadConfig, getMainThreadConfig, getConfigDir, MainThreadJsonConfig } from "./config";
 export { log, registerLogger, type LoggerHub, type WorkerInitPayload } from "./logger";
 export type { Log, LoggerImpl, Level } from "../common/logger_types";
+export { setMetricSink, getMetricSink, type MetricSink } from "./metrics";
+export type { OtelConfig, MetricsConfig, TraceConfig, LogConfig } from "./otel_config";
+export { setSpanSink, getSpanSink } from "./tracing";
+export type { SpanSink, SpanCtx, SpanHandle } from "../common/tracing_types";
+export { onShutdown } from "../common/shutdown";

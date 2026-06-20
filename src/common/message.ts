@@ -1,38 +1,22 @@
-/**
- * Options attached to outbound server-to-server messages sent via BaseCLC.
- * @property clcName - Name of the outbound connection layer client to use
- *   (must match a key in SvrConfig.clcMap).
- * @property noResponse - If true, the caller does not expect a response
- *   and no transaction will be created.
- */
+/** Options attached to outbound server-to-server messages sent via BaseCLC. */
 export type ClcOptions = {
+    /** Must match a key in SvrConfig.clcMap. */
     clcName: string,
+    /** If true, no response is expected and no transaction will be created. */
     noResponse?: boolean
 };
 
-/**
- * Options attached to push messages sent to clients via BaseCL.
- * @property clName - Name of the inbound connection layer to push through
- *   (must match a key in SvrConfig.clMap).
- * @property gids - List of gid (global identifiers) to push to.
- */
+/** Options attached to push messages sent to clients via BaseCL. */
 export type ClOptions = {
+    /** Must match a key in SvrConfig.clMap. */
     clName: string,
     gids: number[]
 };
 
 /**
- * Message head that carries routing and metadata for every Msg.
- * All fields except cmdId are optional; code accessing them should
- * handle undefined (use ?? '' / ?? 0 for fallback).
- *
- * @property cmdId - Command identifier that selects the handler in worker threads.
- * @property openId - User/player identifier, used for routing and business logic.
- * @property zoneId - Zone/server identifier, used for routing and business logic.
- * @property gid - Global user/player identifier, used for routing and business logic.
- * @property txnId - Transaction identifier for correlating async request-response pairs.
- * @property clcOptions - Present when the message is an outbound server-to-server call.
- * @property clOptions - Present when the message is a push to client(s).
+ * Message head. All fields except cmdId are optional; always use ?? fallback when accessing them.
+ * clcOptions is present when the message is an outbound server-to-server call.
+ * clOptions is present when the message is a push to client(s).
  */
 export type MsgHeadType = {
     cmdId: number,
@@ -43,17 +27,15 @@ export type MsgHeadType = {
     clcOptions?: ClcOptions,
     clOptions?: ClOptions,
     errCode?: number,
-    errMsg?: string
+    errMsg?: string,
+    /** W3C trace-context carrier for main↔worker propagation. Framework-internal — business code must not read or write this. */
+    _otel?: Record<string, string>
 };
 
 /** Message body, either binary (Uint8Array) or text (string). */
 export type MsgBodyType = Uint8Array | string;
 
-/**
- * Thrown inside a worker-thread handler to produce a typed error response.
- * The framework catches this and calls respondError(reqMsg, code, msg).
- * Any other thrown value falls through to the generic errCode=-1 path.
- */
+/** Thrown inside a worker-thread handler to produce a typed error response. */
 export class HandlerError extends Error {
     constructor(public code: number, public msg: string) {
         super(msg);
@@ -61,16 +43,10 @@ export class HandlerError extends Error {
     }
 }
 
-/**
- * Msg is the internal message envelope used within dogsvr, primarily for
- * communication between the main thread and worker threads via postMessage.
- * Connection layers convert their own CS/SS formats into Msg at the boundary.
- */
+/** Internal message envelope for main↔worker postMessage. Connection layers convert CS/SS formats into Msg at the boundary. */
 export class Msg {
     constructor(
-        /** Routing and metadata header. */
         public head: MsgHeadType,
-        /** Serialized payload. */
         public body: MsgBodyType,
     ) {
     }

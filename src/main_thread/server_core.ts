@@ -4,16 +4,14 @@ import { TxnMgr } from "../common/transaction";
 import { Msg } from "../common/message";
 import { LbStrategyConfig, ILoadBalancer, createLoadBalancer } from "./lb";
 import { log as rootLog, getLoggerHub } from "./logger";
+import { getMetricSink } from "./metrics";
+import { OtelConfig } from "./otel_config";
 
 const log = rootLog.child({ module: "main_thread/server_core" });
-
-// ---- Hot update strategy config ----
 
 export type HotUpdateStrategyConfig =
     | { strategy: 'allAtOnce' }
     | { strategy: 'rolling' };
-
-// ---- Server config ----
 
 export interface SvrConfig {
     workerThreadRunFile: string;
@@ -24,9 +22,8 @@ export interface SvrConfig {
     hotUpdateTimeout?: number;                    // worker graceful shutdown timeout (ms), defaults to 30000
     hotUpdateStrategy?: HotUpdateStrategyConfig;  // defaults to 'rolling'
     workerConfigPath?: string;                    // config file path for worker threads
+    otel?: OtelConfig;                            // optional otel switches (metrics/traces/logs); default off
 }
-
-// ---- ServerCore ----
 
 export interface ServerCore {
     svrCfg: SvrConfig;
@@ -35,9 +32,8 @@ export interface ServerCore {
     loadBalancer: ILoadBalancer | null;
     workerPendingTxns: Map<Worker, Set<number>>;
 
-    /** Create a new worker and register its message handler; does not add to workerThreads */
+    /** Create a new worker; does not add to workerThreads. */
     createWorker(index: number): Worker;
-    /** Rebuild the loadBalancer (full reset) */
     resetLoadBalancer(): void;
 }
 
@@ -50,8 +46,6 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
         workerPendingTxns: new Map(),
 
         createWorker(index: number): Worker {
-            // Inject logger port into workerData so the worker can call setupLoggerInWorker
-            // without re-deciding mode. Throws if no logger plugin is registered (fail fast).
             const hub = getLoggerHub();
             const loggerPort = hub.issueWorkerPort();
             const loggerInit = hub.workerInitFor(loggerPort);
@@ -68,7 +62,6 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                 transferList,
             });
             core.workerPendingTxns.set(worker, new Set());
-            // Clean up port tracking when the worker exits (rolling hot-update relies on this).
             worker.on("exit", () => hub.releaseWorkerPort(worker));
             worker.on("message", (msg: Msg) => {
                 if (msg.head.clcOptions) {
@@ -82,6 +75,7 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                     const cb = core.txnMgr.onCallback(msg.head.txnId!);
                     if (cb) {
                         core.loadBalancer!.onMessageResolved(index);
+                        getMetricSink().onCmdEnd(msg.head.txnId!, index, (msg.head.errCode ?? 0) === 0);
                         cb(msg);
                     } else {
                         log.error({ txnId: msg.head.txnId, cmdId: msg.head.cmdId }, "no callback for txnId");
