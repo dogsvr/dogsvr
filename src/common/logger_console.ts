@@ -1,8 +1,8 @@
-import type { Level, LoggerImpl } from "./logger_types";
+import type { LoggerImpl } from "./logger_types";
 
 /** Fallback logger used until a logger plugin registers. Emits every level. */
 
-const LEVEL_ORDER: Record<Level, number> = {
+const LEVEL_ORDER: Record<string, number> = {
     trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60, silent: 100,
 };
 
@@ -29,7 +29,7 @@ function makeImpl(bindings: Record<string, unknown>): LoggerImpl {
         warn:  (a, b) => console.warn(format("warn", bindings, a, b)),
         error: (a, b) => console.error(format("error", bindings, a, b)),
         fatal: (a, b) => console.error(format("fatal", bindings, a, b)),
-        isLevelEnabled: (level: Level | string) => (LEVEL_ORDER[level as Level] ?? 0) >= LEVEL_ORDER.trace,
+        isLevelEnabled: (level: string) => (LEVEL_ORDER[level] ?? 0) >= LEVEL_ORDER.trace,
         child: (childBindings) => makeImpl({ ...bindings, ...childBindings }),
     };
 }

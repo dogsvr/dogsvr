@@ -1,15 +1,4 @@
-/**
- * Logger interface contracts shared between main thread and worker thread.
- * The logger plugin (e.g. @dogsvr/logger) implements these; dogsvr core only
- * sees the interfaces.
- */
-
-export type Level = "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "silent";
-
-/**
- * Implementation contract for a logger backend. Plugin packages register an
- * instance via registerLogger() (main) or registerWorkerLogger() (worker).
- */
+/** Plugin contract; registered via registerLogger / registerWorkerLogger. */
 export interface LoggerImpl {
     trace(objOrMsg: object | string, msg?: string, ...args: unknown[]): void;
     debug(objOrMsg: object | string, msg?: string, ...args: unknown[]): void;
@@ -17,15 +6,12 @@ export interface LoggerImpl {
     warn(objOrMsg: object | string, msg?: string, ...args: unknown[]): void;
     error(objOrMsg: object | string, msg?: string, ...args: unknown[]): void;
     fatal(objOrMsg: object | string, msg?: string, ...args: unknown[]): void;
-    isLevelEnabled(level: Level | string): boolean;
+    isLevelEnabled(level: string): boolean;
     child(bindings: Record<string, unknown>): LoggerImpl;
     flush?(): void;
 }
 
-/**
- * Public log API used throughout dogsvr and downstream business code. Methods
- * are overload-typed for both `(obj, msg)` and `(msg)` call shapes.
- */
+/** Public log API; obtained via the `log` export from main_thread / worker_thread. */
 export interface Log {
     trace(obj: object, msg?: string, ...args: unknown[]): void;
     trace(msg: string, ...args: unknown[]): void;
@@ -39,7 +25,7 @@ export interface Log {
     error(msg: string, ...args: unknown[]): void;
     fatal(obj: object, msg?: string, ...args: unknown[]): void;
     fatal(msg: string, ...args: unknown[]): void;
-    isLevelEnabled(level: Level | string): boolean;
+    isLevelEnabled(level: string): boolean;
     child(bindings: Record<string, unknown>): Log;
     flush(): void;
 }

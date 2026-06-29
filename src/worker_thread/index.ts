@@ -123,7 +123,7 @@ export function pushMsgByCl(clName: string, gids: number[], msgHead: MsgHeadType
 export * from "../common/message"
 export { loadWorkerThreadConfig, getThreadConfig, WorkerThreadBaseConfig } from "./config"
 export { log, registerWorkerLogger } from "./logger";
-export type { Log, LoggerImpl, Level } from "../common/logger_types";
+export type { Log, LoggerImpl } from "../common/logger_types";
 export { setSpanSink, getSpanSink } from "./tracing";
 export type { SpanSink, SpanCtx, SpanHandle } from "../common/tracing_types";
 export { onShutdown } from "../common/shutdown";

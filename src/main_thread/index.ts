@@ -102,7 +102,7 @@ export * from "../common/message";
 export { registerCLFactory, registerCLCFactory } from "./cl_factory";
 export { loadMainThreadConfig, getMainThreadConfig, getConfigDir, MainThreadJsonConfig } from "./config";
 export { log, registerLogger, type LoggerHub, type WorkerInitPayload } from "./logger";
-export type { Log, LoggerImpl, Level } from "../common/logger_types";
+export type { Log, LoggerImpl } from "../common/logger_types";
 export { setMetricSink, getMetricSink, type MetricSink } from "./metrics";
 export type { OtelConfig, MetricsConfig, TraceConfig, LogConfig } from "./otel_config";
 export { setSpanSink, getSpanSink } from "./tracing";
