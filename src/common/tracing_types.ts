@@ -23,6 +23,8 @@ export interface SpanSink {
     inject(span: SpanHandle | SpanCtx, carrier: Record<string, string>): void;
     /** Currently-active span on this async context (or null). */
     getCurrent(): SpanHandle | null;
+    /** Cheap variant of getCurrent for hot paths (log mixin) — no SpanHandle alloc. */
+    getCurrentContext(): SpanCtx | null;
     /** Run fn with span as the active span; promises chained inside inherit the context. */
     withActive<T>(span: SpanHandle, fn: () => T): T;
 }
@@ -40,5 +42,6 @@ export const NoopSpanSink: SpanSink = {
     extract: () => null,
     inject() {},
     getCurrent: () => null,
+    getCurrentContext: () => null,
     withActive: (_span, fn) => fn(),
 };
