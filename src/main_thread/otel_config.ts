@@ -2,10 +2,15 @@
 // Application code extends these interfaces to add OTLP exporter details.
 
 export interface MetricsConfig {
-    /** Master switch. */
     enabled: boolean;
-    /** Period (ms) for the framework's txnPending/workerPending sampling loop. Defaults to 1000. */
+    /** Framework sampling loop period (ms). Defaults to 5000. */
     sampleIntervalMs?: number;
+    /** Per-thread CPU + process memory sampling. Requires Linux + /proc; opt-in. */
+    threadStats?: ThreadStatsConfig;
+}
+
+export interface ThreadStatsConfig {
+    enabled: boolean;
 }
 
 export interface TraceConfig {

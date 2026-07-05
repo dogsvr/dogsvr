@@ -1,8 +1,11 @@
-import { parentPort } from 'worker_threads';
+import { parentPort, workerData } from 'worker_threads';
 import { log as rootLog } from "./logger";
 import { getSpanSink } from "./tracing";
+import { getWorkerMetricSink, safeCall } from "./metrics";
+import { reportSelfTidToMain } from "./thread_stats";
 import { Msg, MsgHeadType, MsgBodyType, HandlerError } from '../common/message';
 import { TxnMgr } from "../common/transaction";
+import type { SpanCtx, SpanHandle } from "../common/tracing_types";
 
 const log = rootLog.child({ module: "worker_thread/index" });
 
@@ -31,6 +34,9 @@ export async function workerReady(initFn: () => Promise<void>) {
         log.error({ err }, "uncaughtException");
     });
 
+    const workerIndex = typeof workerData?.workerIndex === 'number' ? workerData.workerIndex : -1;
+    if (workerIndex >= 0) reportSelfTidToMain(workerIndex);
+
     await initFn();
     parentPort!.on('message', (msg: Msg) => {
         if (msg.head.clcOptions) {
@@ -44,12 +50,22 @@ export async function workerReady(initFn: () => Promise<void>) {
             const handler = handlerMap[msg.head.cmdId];
             if (handler) {
                 const sink = getSpanSink();
-                const parentCtx = msg.head._otel ? sink.extract(msg.head._otel) : null;
-                const span = sink.start(`worker.${msg.head.cmdId}`, parentCtx, {
-                    'rpc.cmd_id': msg.head.cmdId,
+                let parentCtx: SpanCtx | null = null;
+                let span: SpanHandle | null = null;
+                safeCall("SpanSink.extract", () => {
+                    parentCtx = msg.head._otel ? sink.extract(msg.head._otel) : null;
                 });
+                safeCall("SpanSink.start", () => {
+                    span = sink.start(`worker.${msg.head.cmdId}`, parentCtx, {
+                        'rpc.cmd_id': msg.head.cmdId,
+                    });
+                });
+                const metricSink = getWorkerMetricSink();
+                const txnIdForMetric = msg.head.txnId ?? -1;
+                safeCall("WorkerMetricSink.onHandlerStart", () =>
+                    metricSink.onHandlerStart(txnIdForMetric, msg.head.cmdId));
                 let ok = false;
-                sink.withActive(span, () => handler(msg)
+                const runHandler = () => handler(msg)
                     .then((ret) => {
                         ok = true;
                         if (ret === undefined) return;   // empty string is a valid body
@@ -61,7 +77,7 @@ export async function workerReady(initFn: () => Promise<void>) {
                         }
                     })
                     .catch((err) => {
-                        span.recordException(err);
+                        safeCall("SpanSink.recordException", () => span?.recordException(err));
                         if (err instanceof HandlerError) {
                             respondError(msg, err.code, err.msg);
                             return;
@@ -76,8 +92,20 @@ export async function workerReady(initFn: () => Promise<void>) {
                         respondError(msg, -1, `Handler exception: ${err}`);
                     })
                     .finally(() => {
-                        span.end(ok);
-                    }));
+                        safeCall("SpanSink.end", () => span?.end(ok));
+                        safeCall("WorkerMetricSink.onHandlerEnd", () =>
+                            metricSink.onHandlerEnd(txnIdForMetric, msg.head.cmdId, ok));
+                    });
+                if (span !== null) {
+                    try {
+                        sink.withActive(span, runHandler);
+                    } catch (err) {
+                        log.error({ err }, "SpanSink.withActive threw; running handler without active span");
+                        runHandler();
+                    }
+                } else {
+                    runHandler();
+                }
             } else {
                 log.error({ cmdId: msg.head.cmdId }, "no handler for cmdId");
             }
@@ -126,4 +154,5 @@ export { log, registerWorkerLogger } from "./logger";
 export type { Log, LoggerImpl } from "../common/logger_types";
 export { setSpanSink, getSpanSink } from "./tracing";
 export type { SpanSink, SpanCtx, SpanHandle } from "../common/tracing_types";
+export { setWorkerMetricSink, getWorkerMetricSink, type WorkerMetricSink } from "./metrics";
 export { onShutdown } from "../common/shutdown";

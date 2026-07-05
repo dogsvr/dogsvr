@@ -4,8 +4,10 @@ import { TxnMgr } from "../common/transaction";
 import { Msg } from "../common/message";
 import { LbStrategyConfig, ILoadBalancer, createLoadBalancer } from "./lb";
 import { log as rootLog, getLoggerHub } from "./logger";
-import { getMetricSink } from "./metrics";
+import { getMetricSink, safeCall } from "./metrics";
 import { OtelConfig } from "./otel_config";
+import { ThreadCpuSampler } from "./thread_stats";
+import type { DogsvrCtlMsg } from "../common/thread_stats_types";
 
 const log = rootLog.child({ module: "main_thread/server_core" });
 
@@ -31,6 +33,7 @@ export interface ServerCore {
     txnMgr: TxnMgr;
     loadBalancer: ILoadBalancer | null;
     workerPendingTxns: Map<Worker, Set<number>>;
+    threadCpuSampler: ThreadCpuSampler | null;
 
     /** Create a new worker; does not add to workerThreads. */
     createWorker(index: number): Worker;
@@ -44,6 +47,10 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
         txnMgr: new TxnMgr(rootLog.child({ module: "main_thread/txnMgr" })),
         loadBalancer: null,
         workerPendingTxns: new Map(),
+        threadCpuSampler:
+            cfg.otel?.metrics?.enabled && cfg.otel.metrics.threadStats?.enabled
+                ? new ThreadCpuSampler()
+                : null,
 
         createWorker(index: number): Worker {
             const hub = getLoggerHub();
@@ -51,6 +58,7 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
             const loggerInit = hub.workerInitFor(loggerPort);
             const workerData: Record<string, unknown> = {
                 workerConfigPath: core.svrCfg.workerConfigPath,
+                workerIndex: index,
                 loggerInit,
             };
             const transferList: TransferListItem[] = [];
@@ -62,23 +70,36 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                 transferList,
             });
             core.workerPendingTxns.set(worker, new Set());
-            worker.on("exit", () => hub.releaseWorkerPort(worker));
-            worker.on("message", (msg: Msg) => {
-                if (msg.head.clcOptions) {
-                    core.svrCfg.clcMap[msg.head.clcOptions.clcName].callCmd(
-                        msg, msg.head.clcOptions.noResponse ? undefined : worker
+            worker.on("exit", () => {
+                hub.releaseWorkerPort(worker);
+                // On hot-update the new worker registers its tid before the old one exits; guard against clobber.
+                if (core.workerThreads[index] === worker) {
+                    core.threadCpuSampler?.unregister(index);
+                }
+            });
+            worker.on("message", (msg: Msg | DogsvrCtlMsg) => {
+                if ((msg as DogsvrCtlMsg).__dogsvrCtl === 'tidReport') {
+                    const ctl = msg as DogsvrCtlMsg;
+                    core.threadCpuSampler?.registerWorkerTid(ctl.workerIndex, ctl.nodeThreadId, ctl.osTid);
+                    return;
+                }
+                const bizMsg = msg as Msg;
+                if (bizMsg.head.clcOptions) {
+                    core.svrCfg.clcMap[bizMsg.head.clcOptions.clcName].callCmd(
+                        bizMsg, bizMsg.head.clcOptions.noResponse ? undefined : worker
                     );
-                } else if (msg.head.clOptions) {
-                    core.svrCfg.clMap[msg.head.clOptions.clName].pushMsg(msg);
+                } else if (bizMsg.head.clOptions) {
+                    core.svrCfg.clMap[bizMsg.head.clOptions.clName].pushMsg(bizMsg);
                 } else {
-                    core.workerPendingTxns.get(worker)?.delete(msg.head.txnId!);
-                    const cb = core.txnMgr.onCallback(msg.head.txnId!);
+                    core.workerPendingTxns.get(worker)?.delete(bizMsg.head.txnId!);
+                    const cb = core.txnMgr.onCallback(bizMsg.head.txnId!);
                     if (cb) {
                         core.loadBalancer!.onMessageResolved(index);
-                        getMetricSink().onCmdEnd(msg.head.txnId!, index, (msg.head.errCode ?? 0) === 0);
-                        cb(msg);
+                        safeCall("MetricSink.onCmdEnd", () =>
+                            getMetricSink().onCmdEnd(bizMsg.head.txnId!, (bizMsg.head.errCode ?? 0) === 0));
+                        cb(bizMsg);
                     } else {
-                        log.error({ txnId: msg.head.txnId, cmdId: msg.head.cmdId }, "no callback for txnId");
+                        log.error({ txnId: bizMsg.head.txnId, cmdId: bizMsg.head.cmdId }, "no callback for txnId");
                     }
                 }
             });

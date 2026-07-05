@@ -2,7 +2,7 @@ import { Worker } from "worker_threads";
 import { Msg } from "../common/message";
 import { log as rootLog } from "./logger";
 import { ServerCore, HotUpdateStrategyConfig } from "./server_core";
-import { getMetricSink } from "./metrics";
+import { getMetricSink, safeCall } from "./metrics";
 
 const log = rootLog.child({ module: "main_thread/hot_update" });
 
@@ -57,7 +57,8 @@ function drainOldWorker(
                 core.workerPendingTxns.get(oldWorker)?.delete(msg.head.txnId!);
                 const cb = core.txnMgr.onCallback(msg.head.txnId!);
                 if (cb) {
-                    getMetricSink().onCmdEnd(msg.head.txnId!, oldIndex, (msg.head.errCode ?? 0) === 0);
+                    safeCall("MetricSink.onCmdEnd", () =>
+                        getMetricSink().onCmdEnd(msg.head.txnId!, (msg.head.errCode ?? 0) === 0));
                     cb(msg);
                 }
                 checkDrained();
