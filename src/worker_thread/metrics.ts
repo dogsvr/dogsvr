@@ -3,13 +3,13 @@ import { log as rootLog } from "./logger";
 const log = rootLog.child({ module: "worker_thread/metrics" });
 
 export interface WorkerMetricSink {
-    onHandlerStart(txnId: number, cmdId: number): void;
-    onHandlerEnd(txnId: number, cmdId: number, ok: boolean): void;
+    onCmdHdlStart(txnId: number, cmdId: number): void;
+    onCmdHdlEnd(txnId: number, cmdId: number, ok: boolean): void;
 }
 
 const NoopSink: WorkerMetricSink = {
-    onHandlerStart() {},
-    onHandlerEnd() {},
+    onCmdHdlStart() {},
+    onCmdHdlEnd() {},
 };
 
 let currentSink: WorkerMetricSink = NoopSink;

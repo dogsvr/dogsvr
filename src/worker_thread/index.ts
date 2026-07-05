@@ -62,8 +62,8 @@ export async function workerReady(initFn: () => Promise<void>) {
                 });
                 const metricSink = getWorkerMetricSink();
                 const txnIdForMetric = msg.head.txnId ?? -1;
-                safeCall("WorkerMetricSink.onHandlerStart", () =>
-                    metricSink.onHandlerStart(txnIdForMetric, msg.head.cmdId));
+                safeCall("WorkerMetricSink.onCmdHdlStart", () =>
+                    metricSink.onCmdHdlStart(txnIdForMetric, msg.head.cmdId));
                 let ok = false;
                 const runHandler = () => handler(msg)
                     .then((ret) => {
@@ -93,8 +93,8 @@ export async function workerReady(initFn: () => Promise<void>) {
                     })
                     .finally(() => {
                         safeCall("SpanSink.end", () => span?.end(ok));
-                        safeCall("WorkerMetricSink.onHandlerEnd", () =>
-                            metricSink.onHandlerEnd(txnIdForMetric, msg.head.cmdId, ok));
+                        safeCall("WorkerMetricSink.onCmdHdlEnd", () =>
+                            metricSink.onCmdHdlEnd(txnIdForMetric, msg.head.cmdId, ok));
                     });
                 if (span !== null) {
                     try {
