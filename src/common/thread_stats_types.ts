@@ -1,12 +1,12 @@
 export type ThreadCpuMode = 'schedstat' | 'stat' | 'disabled';
 
-export type ThreadRole = 'main' | 'worker' | 'internal';
+export type ThreadRole = 'main' | 'worker' | 'internal' | 'logger_central';
 
 export interface ThreadCpuSample {
     osTid: number;
-    /** null for main/internal. */
+    /** Non-null only when role === 'worker'. */
     workerIndex: number | null;
-    /** Node.js worker_threads.threadId; matches `thread` in log records. null for main/internal. */
+    /** Node.js worker_threads.threadId; matches `thread` in log records. Non-null for 'worker' and registered internal-kind threads. */
     nodeThreadId: number | null;
     role: ThreadRole;
     cpuTimeSec: number;

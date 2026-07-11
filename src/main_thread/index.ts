@@ -120,4 +120,5 @@ export type { OtelConfig, MetricsConfig, TraceConfig, LogConfig, ThreadStatsConf
 export { setSpanSink, getSpanSink } from "./tracing";
 export type { SpanSink, SpanCtx, SpanHandle } from "../common/tracing_types";
 export type { ThreadCpuSample, ThreadRole, ThreadCpuMode, ProcessSnapshot, ThreadStatsSnapshot } from "../common/thread_stats_types";
+export { registerInternalThread, unregisterInternalThread } from "./thread_stats";
 export { onShutdown } from "../common/shutdown";

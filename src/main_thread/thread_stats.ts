@@ -11,6 +11,7 @@ import type {
 
 const PROC_ROOT = '/proc';
 const NS_PER_SEC = 1_000_000_000;
+// USER_HZ (unit of utime/stime in /proc); 100 on Linux x86_64/aarch64, independent of kernel CONFIG_HZ.
 const CLK_TCK = 100;
 
 interface PrevState {
@@ -22,6 +23,24 @@ interface PrevState {
 interface WorkerIds {
     workerIndex: number;
     nodeThreadId: number;
+}
+
+type InternalKind = Exclude<ThreadRole, 'main' | 'worker' | 'internal'>;
+
+interface InternalThreadInfo {
+    kind: InternalKind;
+    nodeThreadId: number | null;
+}
+
+const internalThreads = new Map<number, InternalThreadInfo>();
+
+/** Register an internal (non-business-worker) thread so the sampler can classify it by kind. */
+export function registerInternalThread(kind: InternalKind, osTid: number, nodeThreadId: number | null): void {
+    internalThreads.set(osTid, { kind, nodeThreadId });
+}
+
+export function unregisterInternalThread(osTid: number): void {
+    internalThreads.delete(osTid);
 }
 
 export class ThreadCpuSampler {
@@ -113,6 +132,9 @@ export class ThreadCpuSampler {
         for (const tid of this.prev.keys()) {
             if (!alive.has(tid)) this.prev.delete(tid);
         }
+        for (const tid of internalThreads.keys()) {
+            if (!alive.has(tid)) internalThreads.delete(tid);
+        }
         const nowNs = process.hrtime.bigint();
         const results = await Promise.all(tids.map(t => this.readOneTid(t, nowNs).catch(() => null)));
         const samples: ThreadCpuSample[] = [];
@@ -198,9 +220,10 @@ export class ThreadCpuSampler {
             if (dWall > 0) utilization = Math.max(0, dRun) / dWall;
         }
         const ids = this.tidToIds.get(tid);
+        const internal = ids ? undefined : internalThreads.get(tid);
         const workerIndex = ids?.workerIndex ?? null;
-        const nodeThreadId = ids?.nodeThreadId ?? null;
-        const role = this.classifyRole(tid, workerIndex);
+        const nodeThreadId = ids?.nodeThreadId ?? internal?.nodeThreadId ?? null;
+        const role = this.classifyRole(tid, workerIndex, internal);
         const sample: ThreadCpuSample = {
             osTid: tid,
             workerIndex,
@@ -213,8 +236,9 @@ export class ThreadCpuSampler {
         return sample;
     }
 
-    private classifyRole(tid: number, workerIndex: number | null): ThreadRole {
+    private classifyRole(tid: number, workerIndex: number | null, internal: InternalThreadInfo | undefined): ThreadRole {
         if (workerIndex !== null) return 'worker';
+        if (internal) return internal.kind;
         // First unregistered tid we see is the main thread (tgid == pid on Linux).
         if (this.mainOsTid === null && tid === this.pid) this.mainOsTid = tid;
         if (tid === this.mainOsTid || tid === this.pid) return 'main';
