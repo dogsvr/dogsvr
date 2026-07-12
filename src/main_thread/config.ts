@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { SvrConfig } from './server_core';
+import { SvrConfig, MsgChannelConfig } from './server_core';
 import { LbStrategyConfig } from './lb';
 import { HotUpdateStrategyConfig } from './server_core';
 import { OtelConfig } from './otel_config';
@@ -17,6 +17,7 @@ export interface MainThreadJsonConfig {
     lbStrategy?: LbStrategyConfig;
     hotUpdateTimeout?: number;
     hotUpdateStrategy?: HotUpdateStrategyConfig;
+    channel?: { msg?: MsgChannelConfig };
     otel?: OtelConfig;
     [key: string]: any;
 }
@@ -72,6 +73,7 @@ export function loadMainThreadConfig(configPath: string): SvrConfig {
         lbStrategy: raw.lbStrategy,
         hotUpdateTimeout: raw.hotUpdateTimeout,
         hotUpdateStrategy: raw.hotUpdateStrategy,
+        msgChannel: raw.channel?.msg,
         otel: raw.otel,
     };
 }

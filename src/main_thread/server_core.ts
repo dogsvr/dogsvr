@@ -8,12 +8,23 @@ import { getMetricSink, safeCall } from "./metrics";
 import { OtelConfig } from "./otel_config";
 import { ThreadCpuSampler } from "./thread_stats";
 import type { DogsvrCtlMsg } from "../common/thread_stats_types";
+import { MainMsgSabChannel } from "./msg_sab_channel";
+import { DEFAULT_MSG_SAB_DATA_BYTES, DEFAULT_WAIT_ON_FULL_MS, makeMsgSab } from "../common/msg_sab_shared";
 
 const log = rootLog.child({ module: "main_thread/server_core" });
 
 export type HotUpdateStrategyConfig =
     | { strategy: 'allAtOnce' }
     | { strategy: 'rolling' };
+
+export type MsgChannelTransport = 'sab' | 'postMessage';
+
+export interface MsgChannelConfig {
+    transport?: MsgChannelTransport;
+    sabSizeBytes?: number;
+    fallbackOnFull?: boolean;
+    waitOnFullMs?: number;
+}
 
 export interface SvrConfig {
     workerThreadRunFile: string;
@@ -24,6 +35,7 @@ export interface SvrConfig {
     hotUpdateTimeout?: number;                    // worker graceful shutdown timeout (ms), defaults to 30000
     hotUpdateStrategy?: HotUpdateStrategyConfig;  // defaults to 'rolling'
     workerConfigPath?: string;                    // config file path for worker threads
+    msgChannel?: MsgChannelConfig;                // main↔worker channel; defaults to sab transport
     otel?: OtelConfig;                            // optional otel switches (metrics/traces/logs); default off
 }
 
@@ -33,6 +45,7 @@ export interface ServerCore {
     txnMgr: TxnMgr;
     loadBalancer: ILoadBalancer | null;
     workerPendingTxns: Map<Worker, Set<number>>;
+    workerChannels: Map<Worker, MainMsgSabChannel>;
     threadCpuSampler: ThreadCpuSampler | null;
 
     /** Create a new worker; does not add to workerThreads. */
@@ -47,6 +60,7 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
         txnMgr: new TxnMgr(rootLog.child({ module: "main_thread/txnMgr" })),
         loadBalancer: null,
         workerPendingTxns: new Map(),
+        workerChannels: new Map(),
         threadCpuSampler:
             cfg.otel?.metrics?.enabled && cfg.otel.metrics.threadStats?.enabled
                 ? new ThreadCpuSampler()
@@ -56,10 +70,26 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
             const hub = getLoggerHub();
             const loggerPort = hub.issueWorkerPort();
             const loggerInit = hub.workerInitFor(loggerPort);
+            const msgCfg = core.svrCfg.msgChannel ?? {};
+            const useSab = (msgCfg.transport ?? 'sab') === 'sab';
+            const sabBytes = msgCfg.sabSizeBytes ?? DEFAULT_MSG_SAB_DATA_BYTES;
+            let msgSabIn: SharedArrayBuffer | null = null;
+            let msgSabOut: SharedArrayBuffer | null = null;
+            if (useSab) {
+                msgSabIn = makeMsgSab(sabBytes);
+                msgSabOut = makeMsgSab(sabBytes);
+            }
             const workerData: Record<string, unknown> = {
                 workerConfigPath: core.svrCfg.workerConfigPath,
                 workerIndex: index,
                 loggerInit,
+                msgChannel: {
+                    transport: useSab ? 'sab' : 'postMessage',
+                    fallbackOnFull: msgCfg.fallbackOnFull ?? true,
+                    waitOnFullMs: msgCfg.waitOnFullMs ?? DEFAULT_WAIT_ON_FULL_MS,
+                },
+                msgSabIn,
+                msgSabOut,
             };
             const transferList: TransferListItem[] = [];
             if (loggerPort) {
@@ -70,9 +100,19 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                 transferList,
             });
             core.workerPendingTxns.set(worker, new Set());
+
+            if (useSab && msgSabIn && msgSabOut) {
+                // Direction: msgSabIn = worker's IN = main's OUT; msgSabOut = worker's OUT = main's IN.
+                const channel = new MainMsgSabChannel(msgSabIn, msgSabOut, worker);
+                channel.setDispatch(dispatchWorkerMsg);
+                channel.start();
+                core.workerChannels.set(worker, channel);
+            }
+
             worker.on("exit", () => {
                 hub.releaseWorkerPort(worker);
-                // On hot-update the new worker registers its tid before the old one exits; guard against clobber.
+                const ch = core.workerChannels.get(worker);
+                if (ch) { ch.close(); core.workerChannels.delete(worker); }
                 if (core.workerThreads[index] === worker) {
                     core.threadCpuSampler?.unregister(index);
                 }
@@ -83,15 +123,18 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                     core.threadCpuSampler?.registerWorkerTid(ctl.workerIndex, ctl.nodeThreadId, ctl.osTid);
                     return;
                 }
-                const bizMsg = msg as Msg;
+                dispatchWorkerMsg(msg as Msg, worker);
+            });
+
+            function dispatchWorkerMsg(bizMsg: Msg, w: Worker): void {
                 if (bizMsg.head.clcOptions) {
                     core.svrCfg.clcMap[bizMsg.head.clcOptions.clcName].callCmd(
-                        bizMsg, bizMsg.head.clcOptions.noResponse ? undefined : worker
+                        bizMsg, bizMsg.head.clcOptions.noResponse ? undefined : w
                     );
                 } else if (bizMsg.head.clOptions) {
                     core.svrCfg.clMap[bizMsg.head.clOptions.clName].pushMsg(bizMsg);
                 } else {
-                    core.workerPendingTxns.get(worker)?.delete(bizMsg.head.txnId!);
+                    core.workerPendingTxns.get(w)?.delete(bizMsg.head.txnId!);
                     const cb = core.txnMgr.onCallback(bizMsg.head.txnId!);
                     if (cb) {
                         core.loadBalancer!.onMessageResolved(index);
@@ -102,7 +145,8 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                         log.error({ txnId: bizMsg.head.txnId, cmdId: bizMsg.head.cmdId }, "no callback for txnId");
                     }
                 }
-            });
+            }
+
             return worker;
         },
 

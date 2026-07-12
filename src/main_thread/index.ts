@@ -32,6 +32,26 @@ export function getWorkerPendingCounts(): readonly number[] {
     return c.workerThreads.map(w => c.workerPendingTxns.get(w)?.size ?? 0);
 }
 
+export interface MsgChannelStats {
+    workerIndex: number;
+    sabHits: number;
+    fallbackHits: number;
+}
+
+export function getMsgChannelStats(): readonly MsgChannelStats[] {
+    if (core === null) return [];
+    const c = core;
+    const stats: MsgChannelStats[] = [];
+    c.workerThreads.forEach((w, i) => {
+        const ch = c.workerChannels.get(w);
+        if (ch) {
+            const s = ch.getStats();
+            stats.push({ workerIndex: i, sabHits: s.sabHits, fallbackHits: s.fallbackHits });
+        }
+    });
+    return stats;
+}
+
 export async function startServer(cfg: SvrConfig): Promise<void>;
 export async function startServer(configPath: string): Promise<void>;
 export async function startServer(cfgOrPath: SvrConfig | string): Promise<void> {
@@ -73,7 +93,7 @@ export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
                 getSpanSink().inject(span, msg.head._otel);
             }
         });
-        // Register txn callback BEFORE postMessage: any subsequent throw would otherwise hang the Promise.
+        // Register txn callback BEFORE send: any subsequent throw would otherwise hang the Promise.
         core!.txnMgr.addTxn(msg.head.txnId, resolve, () => {
             core!.workerPendingTxns.get(worker)?.delete(msg.head.txnId!);
             core!.loadBalancer!.onMessageResolved(workerIndex);
@@ -84,7 +104,18 @@ export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
             msg.body = '';
             resolve(msg);
         });
-        worker.postMessage(msg);
+        const channel = core!.workerChannels.get(worker);
+        if (channel === undefined) {
+            worker.postMessage(msg);
+        } else if (!channel.send(msg)) {
+            channel.recordFallback();
+            const fallbackOnFull = core!.svrCfg.msgChannel?.fallbackOnFull ?? true;
+            if (fallbackOnFull) {
+                worker.postMessage(msg);
+            } else {
+                log.error({ cmdId: msg.head.cmdId, txnId: msg.head.txnId }, "SAB full, fallback disabled, msg dropped");
+            }
+        }
         core!.loadBalancer!.onMessageSent(workerIndex);
         core!.workerPendingTxns.get(worker)!.add(msg.head.txnId);
         safeCall("MetricSink.onCmdStart", () =>

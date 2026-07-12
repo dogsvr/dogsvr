@@ -1,6 +1,6 @@
 import { Worker } from "worker_threads";
 import { Msg } from "../common/message";
-import { log as rootLog } from "./logger";
+import { log as rootLog, getLoggerHub } from "./logger";
 import { ServerCore, HotUpdateStrategyConfig } from "./server_core";
 import { getMetricSink, safeCall } from "./metrics";
 
@@ -17,10 +17,16 @@ function drainOldWorker(
     return new Promise<void>((resolve) => {
         let done = false;
 
-        const finish = (reason: string) => {
+        const finish = async (reason: string) => {
             if (done) return;
             done = true;
             clearTimeout(timer);
+            const hub = getLoggerHub();
+            if (hub.flushAwaitable) {
+                try { await hub.flushAwaitable(); } catch { /* ignore */ }
+            }
+            const ch = core.workerChannels.get(oldWorker);
+            if (ch) { ch.close(); core.workerChannels.delete(oldWorker); }
             oldWorker.terminate();
             core.workerPendingTxns.delete(oldWorker);
             log.info({ workerIndex: oldIndex, reason }, "old worker stopped");
@@ -29,9 +35,10 @@ function drainOldWorker(
 
         const checkDrained = () => {
             const pending = core.workerPendingTxns.get(oldWorker);
-            if (!pending || pending.size === 0) {
-                finish("drained gracefully");
-            }
+            if (pending && pending.size > 0) return;
+            const ch = core.workerChannels.get(oldWorker);
+            if (ch && !ch.isSabDrained()) return;
+            void finish("drained gracefully");
         };
 
         const timer = setTimeout(() => {
@@ -40,13 +47,12 @@ function drainOldWorker(
                 { workerIndex: oldIndex, remaining: pending?.size ?? 0 },
                 "old worker drain timeout, force terminating"
             );
-            finish("timeout");
+            void finish("timeout");
         }, timeout);
 
-        // Drain-mode handler skips loadBalancer.onMessageResolved to avoid
+        // Drain-mode dispatch skips loadBalancer.onMessageResolved to avoid
         // corrupting LB state for new workers at this index.
-        oldWorker.removeAllListeners("message");
-        oldWorker.on("message", (msg: Msg) => {
+        const drainDispatch = (msg: Msg) => {
             if (msg.head.clcOptions) {
                 core.svrCfg.clcMap[msg.head.clcOptions.clcName].callCmd(
                     msg, msg.head.clcOptions.noResponse ? undefined : oldWorker
@@ -63,9 +69,14 @@ function drainOldWorker(
                 }
                 checkDrained();
             }
-        });
+        };
+        const channel = core.workerChannels.get(oldWorker);
+        if (channel) {
+            channel.setDispatch(drainDispatch);
+        }
+        oldWorker.removeAllListeners("message");
+        oldWorker.on("message", drainDispatch);
 
-        // Maybe already drained
         checkDrained();
     });
 }

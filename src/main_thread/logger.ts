@@ -23,6 +23,8 @@ export interface LoggerHub {
     workerInitFor(port: MessagePort | undefined): WorkerInitPayload;
     bufferedBytes(): number;
     flush(): void;
+    /** Optional awaitable variant used before terminating a worker to drain its log ring. */
+    flushAwaitable?(): Promise<void>;
 }
 
 let impl: LoggerImpl | null = null;
