@@ -8,6 +8,7 @@ import { logEnvInfo } from "./env_info";
 import { getMetricSink, safeCall } from "./metrics";
 import { getSpanSink } from "./tracing";
 import type { ThreadStatsSnapshot } from "../common/thread_stats_types";
+import type { DogsvrBroadcastMsg } from "../common/broadcast_types";
 import "./pm2"
 
 const log = rootLog.child({ module: "main_thread/index" });
@@ -125,6 +126,10 @@ export function sendMsgToWorkerThread(msg: Msg): Promise<Msg> {
 
 let isHotUpdating = false;
 
+export function broadcastToWorkers(msg: DogsvrBroadcastMsg): void {
+    core?.broadcast(msg);
+}
+
 export async function hotUpdate() {
     if (isHotUpdating) {
         log.warn("hotUpdate called while already updating, ignoring");
@@ -152,4 +157,5 @@ export { setSpanSink, getSpanSink } from "./tracing";
 export type { SpanSink, SpanCtx, SpanHandle } from "../common/tracing_types";
 export type { ThreadCpuSample, ThreadRole, ThreadCpuMode, ProcessSnapshot, ThreadStatsSnapshot } from "../common/thread_stats_types";
 export { registerInternalThread, unregisterInternalThread } from "./thread_stats";
+export type { DogsvrBroadcastMsg } from "../common/broadcast_types";
 export { onShutdown } from "../common/shutdown";

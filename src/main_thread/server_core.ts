@@ -8,6 +8,7 @@ import { getMetricSink, safeCall } from "./metrics";
 import { OtelConfig } from "./otel_config";
 import { ThreadCpuSampler } from "./thread_stats";
 import type { DogsvrCtlMsg } from "../common/thread_stats_types";
+import type { DogsvrBroadcastMsg } from "../common/broadcast_types";
 import { MainMsgSabChannel } from "./msg_sab_channel";
 import { DEFAULT_MSG_SAB_DATA_BYTES, DEFAULT_WAIT_ON_FULL_MS, makeMsgSab } from "../common/msg_sab_shared";
 
@@ -34,7 +35,7 @@ export interface SvrConfig {
     lbStrategy?: LbStrategyConfig;                // defaults to roundRobin
     hotUpdateTimeout?: number;                    // worker graceful shutdown timeout (ms), defaults to 30000
     hotUpdateStrategy?: HotUpdateStrategyConfig;  // defaults to 'rolling'
-    workerConfigPath?: string;                    // config file path for worker threads
+    workerConfigPath?: string;
     msgChannel?: MsgChannelConfig;                // main↔worker channel; defaults to sab transport
     otel?: OtelConfig;                            // optional otel switches (metrics/traces/logs); default off
 }
@@ -51,6 +52,8 @@ export interface ServerCore {
     /** Create a new worker; does not add to workerThreads. */
     createWorker(index: number): Worker;
     resetLoadBalancer(): void;
+    /** Broadcast a control message to all live workers via parentPort.postMessage. */
+    broadcast(msg: DogsvrBroadcastMsg): void;
 }
 
 export function createServerCore(cfg: SvrConfig): ServerCore {
@@ -155,6 +158,12 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                 core.svrCfg.lbStrategy ?? { strategy: 'roundRobin' },
                 core.svrCfg.workerThreadNum
             );
+        },
+
+        broadcast(msg: DogsvrBroadcastMsg): void {
+            for (const w of core.workerThreads) {
+                w.postMessage(msg);
+            }
         }
     };
     return core;

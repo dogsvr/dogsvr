@@ -6,14 +6,15 @@ import { reportSelfTidToMain } from "./thread_stats";
 import { Msg, MsgHeadType, MsgBodyType, HandlerError } from '../common/message';
 import { TxnMgr } from "../common/transaction";
 import type { SpanCtx, SpanHandle } from "../common/tracing_types";
+import type { DogsvrBroadcastMsg } from "../common/broadcast_types";
 import { WorkerMsgSabChannel } from "./msg_sab_channel";
 
 const log = rootLog.child({ module: "worker_thread/index" });
 
 export type HandlerRsp =
-    | MsgBodyType                                          // body only
-    | { body: MsgBodyType, head?: Partial<MsgHeadType> }   // body + head patch
-    | void;                                                 // silent drop
+    | MsgBodyType
+    | { body: MsgBodyType, head?: Partial<MsgHeadType> }
+    | void;  // silent drop
 export type HandlerType = (reqMsg: Msg) => Promise<HandlerRsp>;
 type HandlerMapType = { [key: number]: HandlerType }
 const handlerMap: HandlerMapType = {};
@@ -27,6 +28,21 @@ interface MsgChannelWorkerCfg {
 
 let msgChannel: WorkerMsgSabChannel | null = null;
 let msgChannelCfg: MsgChannelWorkerCfg = { transport: 'postMessage', fallbackOnFull: true, waitOnFullMs: 1 };
+const broadcastHandlers: Array<(msg: DogsvrBroadcastMsg) => void> = [];
+
+export function onWorkerBroadcast(handler: (msg: DogsvrBroadcastMsg) => void): void {
+    broadcastHandlers.push(handler);
+}
+
+function runBroadcastHandlers(msg: DogsvrBroadcastMsg): void {
+    for (const h of broadcastHandlers) {
+        try {
+            h(msg);
+        } catch (err) {
+            log.error({ err, type: msg.type }, "broadcast handler threw");
+        }
+    }
+}
 
 function sendToMain(msg: Msg): void {
     if (msgChannel === null) {
@@ -80,12 +96,17 @@ export async function workerReady(initFn: () => Promise<void>) {
     }
 
     await initFn();
-    // Skip parentPort data-path listener when SAB is sole transport (no postMessage fallback path).
-    if (msgChannelCfg.transport === 'postMessage' || msgChannelCfg.fallbackOnFull) {
-        parentPort!.on('message', (msg: Msg) => {
-            handleIncoming(msg);
-        });
-    }
+    // parentPort listener always installed: it must at minimum route broadcast
+    // control messages, even when SAB is the sole business transport.
+    parentPort!.on('message', (msg: Msg | DogsvrBroadcastMsg) => {
+        if ((msg as DogsvrBroadcastMsg).__dogsvrBroadcast === true) {
+            runBroadcastHandlers(msg as DogsvrBroadcastMsg);
+            return;
+        }
+        if (msgChannelCfg.transport === 'postMessage' || msgChannelCfg.fallbackOnFull) {
+            handleIncoming(msg as Msg);
+        }
+    });
 }
 
 function handleIncoming(msg: Msg): void {
@@ -204,4 +225,5 @@ export type { Log, LoggerImpl } from "../common/logger_types";
 export { setSpanSink, getSpanSink } from "./tracing";
 export type { SpanSink, SpanCtx, SpanHandle } from "../common/tracing_types";
 export { setWorkerMetricSink, getWorkerMetricSink, type WorkerMetricSink } from "./metrics";
+export type { DogsvrBroadcastMsg } from "../common/broadcast_types";
 export { onShutdown } from "../common/shutdown";
