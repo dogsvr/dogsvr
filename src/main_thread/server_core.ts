@@ -9,8 +9,8 @@ import { OtelConfig } from "./otel_config";
 import { ThreadCpuSampler } from "./thread_stats";
 import type { DogsvrCtlMsg } from "../common/thread_stats_types";
 import type { DogsvrBroadcastMsg } from "../common/broadcast_types";
-import { MainMsgSabChannel } from "./msg_sab_channel";
-import { DEFAULT_MSG_SAB_DATA_BYTES, DEFAULT_WAIT_ON_FULL_MS, makeMsgSab } from "../common/msg_sab_shared";
+import { MainSabMsgChannel } from "./sab_msg_channel";
+import { DEFAULT_MSG_SAB_DATA_BYTES, DEFAULT_WAIT_ON_FULL_MS, makeMsgSab } from "../common/sab_msg";
 
 const log = rootLog.child({ module: "main_thread/server_core" });
 
@@ -46,7 +46,7 @@ export interface ServerCore {
     txnMgr: TxnMgr;
     loadBalancer: ILoadBalancer | null;
     workerPendingTxns: Map<Worker, Set<number>>;
-    workerChannels: Map<Worker, MainMsgSabChannel>;
+    workerChannels: Map<Worker, MainSabMsgChannel>;
     threadCpuSampler: ThreadCpuSampler | null;
 
     /** Create a new worker; does not add to workerThreads. */
@@ -106,8 +106,7 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
 
             if (useSab && msgSabIn && msgSabOut) {
                 // Direction: msgSabIn = worker's IN = main's OUT; msgSabOut = worker's OUT = main's IN.
-                const channel = new MainMsgSabChannel(msgSabIn, msgSabOut, worker);
-                channel.setDispatch(dispatchWorkerMsg);
+                const channel = new MainSabMsgChannel(msgSabIn, msgSabOut, worker, dispatchWorkerMsg);
                 channel.start();
                 core.workerChannels.set(worker, channel);
             }
@@ -115,7 +114,7 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
             worker.on("exit", () => {
                 hub.releaseWorkerPort(worker);
                 const ch = core.workerChannels.get(worker);
-                if (ch) { ch.close(); core.workerChannels.delete(worker); }
+                if (ch) { ch.stop(); core.workerChannels.delete(worker); }
                 if (core.workerThreads[index] === worker) {
                     core.threadCpuSampler?.unregister(index);
                 }

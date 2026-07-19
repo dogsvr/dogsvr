@@ -117,18 +117,17 @@ For a complete, runnable example with three servers, Redis/MongoDB integration, 
 
 ## Import paths
 
-`@dogsvr/dogsvr` exposes **two subpaths** and no root:
+`@dogsvr/dogsvr` exposes **three subpaths** and no root:
 
 ```ts
 import * as dogsvr from '@dogsvr/dogsvr/main_thread';    // main-thread APIs
 import * as dogsvr from '@dogsvr/dogsvr/worker_thread';  // worker-thread APIs
+import { SabLineWriter } from '@dogsvr/dogsvr/common';   // SAB line-stream transport (for external plugins)
 ```
 
 Attempting `require('@dogsvr/dogsvr')` returns `ERR_PACKAGE_PATH_NOT_EXPORTED` — this is **intentional**, so that code running in a worker can never accidentally pull in `startServer` (which would recursively spawn more workers).
 
-Main-thread surface (`startServer`, `sendMsgToWorkerThread`, `hotUpdate`, `getConnLayer`, `BaseCL`, `BaseCLC`, `registerCLFactory`, `registerCLCFactory`, `loadMainThreadConfig`, `getMainThreadConfig`, `log`, `registerLogger`, `Msg`, …) — see [`src/main_thread/index.ts`](src/main_thread/index.ts).
-
-Worker-thread surface (`workerReady`, `regCmdHandler`, `respondCmd`, `respondError`, `callCmdByClc`, `pushMsgByCl`, `loadWorkerThreadConfig`, `getThreadConfig<T>`, `log`, `registerWorkerLogger`, `Msg`, …) — see [`src/worker_thread/index.ts`](src/worker_thread/index.ts).
+Full surface lists live in the barrel files: [`src/main_thread/index.ts`](src/main_thread/index.ts), [`src/worker_thread/index.ts`](src/worker_thread/index.ts), [`src/common/index.ts`](src/common/index.ts). For the design rationale (why no root, the single-sided rule, resolver compatibility), see [`docs/explanation/subpaths.md`](docs/explanation/subpaths.md).
 
 ## Architecture
 
@@ -140,69 +139,23 @@ Worker-thread surface (`workerReady`, `regCmdHandler`, `respondCmd`, `respondErr
 
 ## Logger
 
-`@dogsvr/dogsvr` defines the logger contract (`Log`, `LoggerImpl`, `LoggerHub`, `Level`) and exposes a `log` proxy from both subpaths — but ships only a console-based fallback. To get NDJSON output, install [`@dogsvr/logger`](https://github.com/dogsvr/logger) and call `setupLogger()` / `setupLoggerInWorker()` once at startup:
+The framework defines the logger contract (`Log`, `LoggerImpl`, `LoggerHub`, `Level`) and exposes a `log` proxy from both subpaths, but ships only a console-based fallback. For NDJSON output install [`@dogsvr/logger`](https://github.com/dogsvr/logger) and wire it once at startup; to plug in a different backend call `registerLogger()` / `registerWorkerLogger()` with your own `LoggerImpl`.
 
-```ts
-// main thread entry
-import * as dogsvr from '@dogsvr/dogsvr/main_thread';
-import { setupLogger } from '@dogsvr/logger/main_thread';
+See [`docs/how-to/setup_logger.md`](docs/how-to/setup_logger.md) for the full wiring.
 
-const cfg = dogsvr.loadMainThreadConfig(...);
-setupLogger({ ...cfg.log, base: { svrId: 'mysvr' } });
-dogsvr.startServer(cfg);
-```
+## More
 
-```ts
-// worker thread entry
-import { workerData } from 'node:worker_threads';
-import * as dogsvr from '@dogsvr/dogsvr/worker_thread';
-import { setupLoggerInWorker, type WorkerInitPayload } from '@dogsvr/logger/worker_thread';
+- [Set up the logger](docs/how-to/setup_logger.md) — NDJSON output, worker wiring, alternative backends
+- [Subpaths](docs/explanation/subpaths.md) — three-subpath design, resolver compatibility, the single-sided rule, why no root
+- [SAB transport layers](docs/explanation/sab_transport_layers.md) — three-layer split (ring / line / msg), subpath exposure rule, hot-path invariants, hot-update drain trap
+- [`src/common/` directory discipline](docs/explanation/common_directory_discipline.md) — what belongs in `common/`, auditing recipe, paired-strategy reshaping
 
-dogsvr.workerReady(async () => {
-    dogsvr.loadWorkerThreadConfig();
-    const cfg = dogsvr.getThreadConfig<{ log: { level: dogsvr.Level } }>();
-    setupLoggerInWorker({
-        ...(workerData as { loggerInit: WorkerInitPayload }).loggerInit,
-        level: cfg.log.level,
-        base: { svrId: 'mysvr' },
-    });
-});
-```
+Related repos in the dogsvr ecosystem:
 
-The main thread passes a `MessagePort` to each worker via `workerData.loggerInit` automatically — you just spread it. The `log` config key in your JSON configs is a business field (not read by the framework core); add it to your typed config interface and read it with `getMainThreadConfig<T>()` / `getThreadConfig<T>()` as shown above.
-
-To use a different backend, skip `@dogsvr/logger` and call `registerLogger(hub)` (main) / `registerWorkerLogger(impl)` (worker) yourself with your own `LoggerImpl`. Each `register*` is one-shot — calling twice throws.
-
-If no plugin registers, `log.*` calls fall back to the console logger, which emits a one-time `process.emitWarning`. Spawning workers before `setupLogger()` throws rather than silently misrouting log lines.
-
-## Package resolution compatibility
-
-`@dogsvr/dogsvr` is authored to resolve correctly under **every JavaScript module resolver**. Modern resolvers read the `exports` field; older ones fall back to stub `package.json` files under `main_thread/` and `worker_thread/`:
-
-| Resolver | Reads `exports`? | Reads stub `package.json`? | Result |
-|---|:-:|:-:|---|
-| Node.js (modern) | ✓ | — | Hits `dist/…` via `exports` |
-| Node.js (legacy, pre-exports) | ✗ | ✓ | Hits `dist/…` via stub's `main` |
-| TypeScript `moduleResolution: bundler` / `node16` / `nodenext` | ✓ | — | Hits `dist/….d.ts` via `exports.types` |
-| TypeScript `moduleResolution: node` (TS default) | ✗ | ✓ | Hits `dist/….d.ts` via stub's `types` |
-| Webpack / Rollup / Vite / Parcel / esbuild (modern) | ✓ | — | Hits `dist/…` via `exports` |
-| Webpack 4 and other legacy bundlers | ✗ | ✓ | Hits `dist/…` via stub's `main` |
-
-In every case, exactly one of the two mechanisms resolves the import — nothing to configure on the consumer side.
-
-### Published layout
-
-```
-@dogsvr/dogsvr/
-├── main_thread/
-│   └── package.json        # stub: { "main": "../dist/main_thread/index.js", "types": "../dist/main_thread/index.d.ts" }
-├── worker_thread/
-│   └── package.json        # stub: { "main": "../dist/worker_thread/index.js", "types": "../dist/worker_thread/index.d.ts" }
-├── dist/
-│   ├── main_thread/index.{js,d.ts}
-│   └── worker_thread/index.{js,d.ts}
-└── package.json            # "exports" map for modern resolvers
-```
+- Logger plugin: [`@dogsvr/logger`](https://github.com/dogsvr/logger)
+- Connection layers: [`@dogsvr/cl-tsrpc`](https://github.com/dogsvr/cl-tsrpc) · [`@dogsvr/cl-grpc`](https://github.com/dogsvr/cl-grpc)
+- Config pipeline: [`@dogsvr/cfg-luban`](https://github.com/dogsvr/cfg-luban) · [`@dogsvr/cfg-luban-cli`](https://github.com/dogsvr/cfg-luban-cli)
+- Reference integration: [`example-proj`](https://github.com/dogsvr/example-proj) · [`example-proj-cfg`](https://github.com/dogsvr/example-proj-cfg) · [`example-proj-client`](https://github.com/dogsvr/example-proj-client)
 
 ## License
 

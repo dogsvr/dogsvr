@@ -7,7 +7,7 @@ import { Msg, MsgHeadType, MsgBodyType, HandlerError } from '../common/message';
 import { TxnMgr } from "../common/transaction";
 import type { SpanCtx, SpanHandle } from "../common/tracing_types";
 import type { DogsvrBroadcastMsg } from "../common/broadcast_types";
-import { WorkerMsgSabChannel } from "./msg_sab_channel";
+import { WorkerSabMsgChannel } from "./sab_msg_channel";
 
 const log = rootLog.child({ module: "worker_thread/index" });
 
@@ -26,7 +26,7 @@ interface MsgChannelWorkerCfg {
     waitOnFullMs: number;
 }
 
-let msgChannel: WorkerMsgSabChannel | null = null;
+let msgChannel: WorkerSabMsgChannel | null = null;
 let msgChannelCfg: MsgChannelWorkerCfg = { transport: 'postMessage', fallbackOnFull: true, waitOnFullMs: 1 };
 const broadcastHandlers: Array<(msg: DogsvrBroadcastMsg) => void> = [];
 
@@ -90,8 +90,7 @@ export async function workerReady(initFn: () => Promise<void>) {
     const sabIn = workerData?.msgSabIn as SharedArrayBuffer | undefined;
     const sabOut = workerData?.msgSabOut as SharedArrayBuffer | undefined;
     if (msgChannelCfg.transport === 'sab' && sabIn && sabOut) {
-        msgChannel = new WorkerMsgSabChannel(sabIn, sabOut);
-        msgChannel.setDispatch(handleIncoming);
+        msgChannel = new WorkerSabMsgChannel(sabOut, sabIn, handleIncoming);
         msgChannel.start();
     }
 

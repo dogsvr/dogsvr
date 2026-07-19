@@ -23,10 +23,10 @@ function drainOldWorker(
             clearTimeout(timer);
             const hub = getLoggerHub();
             if (hub.flushAwaitable) {
-                try { await hub.flushAwaitable(); } catch { /* ignore */ }
+                try { await hub.flushAwaitable(); } catch {}
             }
             const ch = core.workerChannels.get(oldWorker);
-            if (ch) { ch.close(); core.workerChannels.delete(oldWorker); }
+            if (ch) { ch.stop(); core.workerChannels.delete(oldWorker); }
             oldWorker.terminate();
             core.workerPendingTxns.delete(oldWorker);
             log.info({ workerIndex: oldIndex, reason }, "old worker stopped");
@@ -50,8 +50,7 @@ function drainOldWorker(
             void finish("timeout");
         }, timeout);
 
-        // Drain-mode dispatch skips loadBalancer.onMessageResolved to avoid
-        // corrupting LB state for new workers at this index.
+        // checkDrained deferred to next macrotask: SabMsgReader commits read after pumpOnce exits, so W==R is invisible mid-dispatch.
         const drainDispatch = (msg: Msg) => {
             if (msg.head.clcOptions) {
                 core.svrCfg.clcMap[msg.head.clcOptions.clcName].callCmd(
@@ -67,8 +66,8 @@ function drainOldWorker(
                         getMetricSink().onCmdEnd(msg.head.txnId!, (msg.head.errCode ?? 0) === 0));
                     cb(msg);
                 }
-                checkDrained();
             }
+            setImmediate(checkDrained);
         };
         const channel = core.workerChannels.get(oldWorker);
         if (channel) {

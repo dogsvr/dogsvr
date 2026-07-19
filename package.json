@@ -19,6 +19,10 @@
       "types": "./dist/worker_thread/index.d.ts",
       "default": "./dist/worker_thread/index.js"
     },
+    "./common": {
+      "types": "./dist/common/index.d.ts",
+      "default": "./dist/common/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -26,6 +30,7 @@
     "dist/**/*.d.ts",
     "main_thread",
     "worker_thread",
+    "common",
     "LICENSE",
     "README.md"
   ],
