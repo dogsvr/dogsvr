@@ -1,16 +1,15 @@
 import type { Msg, MsgHeadType, MsgBodyType } from "./message";
 import {
     SabRingView,
-    SEQ_INDEX,
     WRITE_INDEX,
     READ_INDEX,
-    asyncApi,
     makeSabRing,
     openSabRing,
     readState,
     commitWrite,
     commitRead,
     resetIndexes,
+    waitAsync,
 } from "./sab_ring";
 
 const FRAME_LEN_BYTES = 4;
@@ -137,17 +136,12 @@ export class SabMsgReader {
     private waitForData(): void {
         if (this.stopped) return;
         const {state} = this.view;
-        const seq = Atomics.load(state, SEQ_INDEX);
         const {write, read} = readState(state);
         if (write !== read) {
             setImmediate(this.loopBound);
             return;
         }
-        if (!asyncApi.waitAsync) {
-            setImmediate(this.loopBound);
-            return;
-        }
-        const res = asyncApi.waitAsync(state, SEQ_INDEX, seq);
+        const res = waitAsync(state, WRITE_INDEX, write);
         if (!res.async) {
             setImmediate(this.loopBound);
             return;

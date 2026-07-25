@@ -103,6 +103,7 @@ The reader/writer sit on the fast path for every cross-thread message. The follo
 
 ## References
 
+- [SAB ring design: drain-reset vs classic ring](sab_ring_design.md) — why the L1 primitive is a drain-reset buffer rather than a modulo ring, and how the choice interacts with wrapper-level fallback policies.
 - [Common directory discipline](common_directory_discipline.md) — `src/common/` holds only files genuinely imported from both sides. Single-sided files or paired families live under their own top-level subdir.
 - [Subpaths](subpaths.md) — the three-subpath design and the single-sided rule that governs how the transport is exposed.
 - Logger's strategy layout mirrors the same split rule (`strategies/{inline,central}/`) — see [`@dogsvr/logger`](https://github.com/dogsvr/logger).

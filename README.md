@@ -148,6 +148,7 @@ See [`docs/how-to/setup_logger.md`](docs/how-to/setup_logger.md) for the full wi
 - [Set up the logger](docs/how-to/setup_logger.md) — NDJSON output, worker wiring, alternative backends
 - [Subpaths](docs/explanation/subpaths.md) — three-subpath design, resolver compatibility, the single-sided rule, why no root
 - [SAB transport layers](docs/explanation/sab_transport_layers.md) — three-layer split (ring / line / msg), subpath exposure rule, hot-path invariants, hot-update drain trap
+- [SAB ring design](docs/explanation/sab_ring_design.md) — drain-reset vs classic modulo ring, back-pressure timing, fallback-layer interaction
 - [`src/common/` directory discipline](docs/explanation/common_directory_discipline.md) — what belongs in `common/`, auditing recipe, paired-strategy reshaping
 
 Related repos in the dogsvr ecosystem:
