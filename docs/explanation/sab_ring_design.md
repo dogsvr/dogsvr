@@ -1,18 +1,30 @@
 # SAB ring design: drain-reset vs classic ring
 
-This note explains why dogsvr's SAB transport uses a **drain-reset** buffer instead of a classic modulo ring buffer, what the trade-offs are, and how the design meshes with the per-channel fallback policies at the wrapper layer.
+dogsvr's SAB transport used a **drain-reset** buffer until 2026-09, when it moved to a classic
+power-of-2 ring. This note records both designs, the measurements that drove the switch, and
+what the switch costs — because the reason is narrower than it first appears, and the old design
+is genuinely better on one axis.
 
 For the three-layer file structure and hot-path invariants, see [sab_transport_layers.md](sab_transport_layers.md); this note only covers the *why*.
 
 ## TL;DR
 
-- The primitive in `common/sab_ring.ts` is **not a classic ring buffer** despite its name. It is a fixed-size SPSC byte buffer with two monotonic cursors that get reset to zero once the reader catches the writer.
-- Drain-reset is not "more advanced" than a classic ring. It is a **simpler** design with a **lower peak-utilization ceiling**, chosen because dogsvr's workloads sit far from that ceiling and the upper layers benefit from its two side effects: **contiguous frames** and **early back-pressure**.
-- Every channel that uses this ring has a fallback strategy at the wrapper layer, so early back-pressure is a feature, not a leak. The primitive itself carries no fallback.
+- `common/sab_ring.ts` is now a **classic power-of-2 ring**: free-running `int32` cursors, index
+  by mask, and a padding record at the tail so frames still never straddle the wrap.
+- **The switch was not motivated by buffer utilization.** On a like-for-like comparison the two
+  designs are identical whenever the consumer keeps up, and drain-reset is *better* when the
+  consumer stalls outright. The utilization gap only appears in a narrow regime (consumer
+  chronically a few percent behind) and is worth 0.3–2.3 percentage points of acceptance.
+- **The switch was motivated by `Atomics.notify`.** Free-running cursors are what make notify
+  elision possible, and notify is where the transport's CPU actually went: waking a parked
+  thread costs ~6 µs versus ~10 ns for the barrier that replaces it. Elision now removes 99%+
+  of notifies under load. See [sab_transport_layers.md](sab_transport_layers.md#notify-elision-why-cstate-exists).
+- The cost is a larger record header (8 B + 8 B alignment vs 4 B) and slightly more complex
+  writer logic. That is a real, accepted regression in space efficiency.
 
-## What drain-reset actually does
+## What drain-reset did (the previous design)
 
-Both cursors (`WRITE_INDEX`, `READ_INDEX`) advance monotonically from `0` toward `dataBytes`. They **never wrap by modulo**. The space check inside `tryWrite` is:
+Both cursors (`WRITE_INDEX`, `READ_INDEX`) advanced monotonically from `0` toward `dataBytes`. They **never wrapped by modulo**. The space check inside `tryWrite` was:
 
 ```ts
 if (write >= read) {
@@ -22,9 +34,9 @@ if (write >= read) {
 }
 ```
 
-The `write >= read` branch is the steady state; the tail-space check only considers `dataBytes - write` — not how much the reader has already consumed. Once the writer reaches the tail, further writes are refused **regardless of how much of the front of the buffer is free**. Only when `write === read` does `resetIndexes` bring both cursors back to `0` and the buffer becomes writable again.
+The `write >= read` branch was the steady state; the tail-space check only considered `dataBytes - write` — not how much the reader had already consumed. Once the writer reached the tail, further writes were refused **regardless of how much of the front of the buffer was free**. Only when `write === read` did `resetIndexes` bring both cursors back to `0`.
 
-This is intentional. The design bets that in dogsvr's workload the reader catches the writer far more often than it lags meaningfully, so the reset happens naturally and back-to-back cycles look almost the same as if the buffer wrapped.
+The design bet that the reader catches the writer far more often than it lags meaningfully. That bet was **correct** — see the measurements below. What it missed is that `resetIndexes` ended with an `Atomics.notify`, and in the steady state `write === read && write !== 0` held on almost every message, so the reset fired constantly and paid the wakeup cost every time.
 
 ## Comparison with a classic modulo ring
 
@@ -40,11 +52,19 @@ A classic ring uses a power-of-two size and masks the cursors: `offset = cursor 
 | Consumer-keeps-up regime | Full throughput; reset is invisible | Full throughput |
 | Consumer-lags regime | Refuses early once tail is reached | Keeps filling gaps until truly full |
 | Reset behavior | Explicit `resetIndexes` seqlock-protected | None needed |
+| Record header | 4 B length | 8 B (length + meta), payload 8 B-aligned |
+| Notify elision | Not possible — cursors reset, so there is no stable value to park on | Possible: park on a free-running `TAIL`, publish `CSTATE` |
 
-Two of the differences are decisive for the choice:
+On the two differences that originally drove the choice:
 
-1. **Contiguous frames.** Reader-side dispatch of a straddling frame in a classic ring requires either a per-frame concat (which allocates), a per-frame copy through scratch space (which is another memcpy), or writer-side padding at the tail (which wastes space and complicates the frame format). Drain-reset removes the entire straddling case from the reader hot path.
-2. **Early back-pressure.** A classic ring keeps the writer running until the buffer is truly saturated; drain-reset trips `tryWrite === false` as soon as the tail is reached, which is typically earlier. Whether that is good or bad depends entirely on what the wrapper layer does with the signal — see the fallback section.
+1. **Contiguous frames — kept.** This property was worth keeping, and the current design keeps it:
+   when a record does not fit in the tail, the writer emits a **padding record** (negative length)
+   and restarts at offset 0. The reader skips padding and never sees a straddling frame, so the
+   reader hot path is the same as it was under drain-reset. The cost is the occasional wasted tail
+   fragment, which is bounded by one max-record-size per wrap.
+2. **Early back-pressure — given up, and it mattered less than claimed.** A classic ring keeps the
+   writer running until the buffer is truly saturated. The measurements below show the practical
+   difference is small and, in the stalled-consumer case, favours the old design.
 
 ## When each design wins
 
@@ -61,7 +81,14 @@ Two of the differences are decisive for the choice:
 - Tail latency at high sustained throughput matters more than reader-side simplicity — classic ring hides transient reader hiccups by using the free front of the buffer.
 - The reader is prepared to handle straddling frames efficiently (e.g. with `readv`-style scatter reads or when frames are fixed-size slot-aligned so wrap never splits them).
 
-dogsvr's channels — one for logger lines from workers to a central sink, one for RPC-shaped `Msg` frames between the main thread and each business worker — sit squarely in the first category. The reader is either the main event loop (for `Msg`) or a dedicated logger sink thread pulling into pino, and neither runs at the sustained saturation levels where a classic ring would pay off. Frames are small-to-medium (100 B–64 KB), well below the 1 MB default `dataBytes` for `Msg` and the 4 MB default for line channels.
+**This classification held up under measurement.** The "classic ring wins when the reader is
+chronically slightly behind" case is exactly the one that shows a gap, and nothing else does —
+see the next section. What did *not* hold up is the follow-on claim that dogsvr never enters
+that regime: at 500 k lines/s the logger channel does.
+
+But note what that means for the decision: the utilization argument is worth a couple of
+percentage points, not the order of magnitude the original framing implied. The switch is
+justified by notify elision, not by this table.
 
 ## Utilization: worked example
 
@@ -74,7 +101,33 @@ To make the ceiling concrete, consider a 1 MB buffer with average frames of 1 KB
 
 A classic ring in the same scenario would keep filling the front 800 KB with no stall. So drain-reset's effective throughput per cycle can be as low as `dataBytes − reader_lag`. That is the price paid.
 
-In dogsvr, the two mitigations are (a) the reader almost always keeps up, so `reader_lag` is small and stalls are rare, and (b) when the reader *does* fall behind, the wrapper layer's fallback absorbs the refused writes — see below.
+In dogsvr the reader almost always keeps up, so `reader_lag` is small and stalls are rare; when
+the reader does fall behind, the wrapper layer's fallback absorbs the refused writes — see below.
+
+### What the gap actually measures
+
+Simulated with pino-shaped lines (85 % 150–400 B, 14 % 400 B–1 kB, 1 % 2–8 kB) into a 4 MiB ring,
+both designs driven by the *same* consumer model retiring whole records:
+
+| Consumer pace | Classic + padding | Drain-reset | Gap |
+|---|---:|---:|---:|
+| Keeps up exactly | 100.00 % | 100.00 % | **none** |
+| 0.1 % behind | 100.00 % | 99.74 % | +0.3 pp |
+| 1 % behind | 100.00 % | 98.87 % | +1.1 pp |
+| 5 % behind | 97.17 % | 94.95 % | +2.2 pp |
+| 10 % behind | 92.23 % | 89.92 % | +2.3 pp |
+
+Two results are worth recording because they contradict the intuition that motivated the rewrite:
+
+- **Coarse batching does not hurt drain-reset.** With the consumer keeping up on average but
+  draining in batches of 1 → 8192 records, both designs accept 100 %. The "consumer wakes rarely,
+  so the writer hits the tail with the front empty" scenario does not materialise.
+- **A fully stalled consumer favours drain-reset** (92.57 % vs 90.63 % over a 12 000-line burst),
+  because its 4 B header beats an 8 B header plus 8 B alignment — the same buffer simply holds
+  more records.
+
+So the honest summary is: classic ring buys 0.3–2.3 pp of acceptance in one regime, and loses
+~2 pp in another. If utilization were the only consideration, this rewrite would not be worth doing.
 
 ## The mask overhead argument is a red herring
 
@@ -102,46 +155,84 @@ The primitive itself carries **no** fallback logic. `sab_ring`, `sab_line`, and 
 
 ## Steady-state throughput expectation
 
-Empirically (in the sense of "consistent with published SPSC ring literature and the primitive's design"), the two designs are within a few percent on the reader-keeps-up path. Drain-reset's slight edge on the reader side (single contiguous copy, no straddle branch, no reassembly path) approximately offsets classic ring's slight edge on the writer side (no reset moment, no `write===read` check). For dogsvr's channels this margin is well below the noise floor of any real workload; it is not a factor in the choice.
+The original version of this section claimed the two designs are "within a few percent on the
+reader-keeps-up path" and that the margin "is not a factor in the choice". **The first half was
+right** — measurement puts them at exactly equal (100 % vs 100 %) whenever the consumer keeps up.
+The second half was right too, just not in the way it intended: utilization is indeed not the
+deciding factor. The deciding factor turned out to be something the section did not consider at
+all, namely the cost of the wakeup mechanism.
 
-The choice is instead driven by:
+What drives the current choice:
 
-1. Reader-side simplicity (contiguous frames).
-2. Back-pressure timing that matches the wrapper fallbacks.
-3. Implementation simplicity (no bitmask, no straddle handling, no fixed-slot alignment constraint on `dataBytes`).
+1. **Notify elision** (the reason for the rewrite). Free-running cursors give the consumer a
+   stable value to park on, which is what makes the Dekker handshake in `sab_pump.ts` possible.
+   Drain-reset cannot support this: resetting both cursors to zero destroys the parked-on value.
+2. Reader-side simplicity — preserved via padding records, not lost.
+3. Back-pressure timing that matches the wrapper fallbacks — slightly worse now, accepted.
+
+Accepted regressions, stated plainly: a 4 B header became 8 B plus 8 B payload alignment;
+`dataBytes` must now be a power of two; and the writer carries mask/padding/unsigned-distance
+logic it did not have before.
 
 ## When to revisit this decision
 
-Revisit if any of these become true:
+The 2026-09 switch was triggered by the first condition this section originally listed —
+sustained utilization climbing, observed as logger drops at high line rates — but the
+investigation found the utilization ceiling was the *lesser* problem and notify cost the
+greater one.
 
-- Sustained utilization pushes past ~50 %. `sabHits/fallbackHits` in the msg wrapper, and drop counts in the logger, are the telemetry to watch. If fallback ratio climbs to a non-trivial fraction of total traffic, the drain-reset ceiling is starting to bite.
-- A new channel is introduced where per-frame allocation is unacceptable *and* frames may exceed half of `dataBytes` (making stalls frequent by construction).
-- Latency SLO on cross-thread messages tightens to the point where the reset gap (a few `waitAsync` / `notify` cycles per drain cycle) shows up in tail-latency percentiles.
+Revisit the current design if:
 
-None of these hold at time of writing. The current shape is the right one for dogsvr's traffic profile.
+- **Header overhead starts to matter.** The 8 B header plus alignment costs ~3.2 % of a 4 MiB
+  ring at 250 B average lines, versus ~1.6 % before. If record sizes shrink substantially
+  (say, a metrics channel with 32 B records), that ratio gets bad enough to reconsider the
+  frame format — not necessarily the ring shape.
+- **A consumer appears that parks constantly.** Notify elision pays off in proportion to how
+  busy the consumer is. A channel whose consumer is idle most of the time gets little benefit
+  and still pays the header cost.
+- **`Atomics.waitAsync` gains a timeout-capable form worth using**, which would allow a
+  park/poll hybrid without the current `setTimeout` machinery in `sab_pump.ts`.
+
+Telemetry to watch: `sabHits` / `fallbackHits` in the msg wrapper and drop counts in the logger.
+Note that `fallbackHits` should now trend toward zero, so it is a weaker signal than it was —
+a sustained non-zero value means something is genuinely wrong rather than merely busy.
 
 ## Related state header design
 
-The state header layout (`SEQ_INDEX=0`, `WRITE_INDEX=1`, `READ_INDEX=16`, `STATE_SLOTS=32`) is a separate concern from drain-reset itself, but co-optimized:
+The current layout is three cursors on separate 64 B cachelines: `TAIL_INDEX` (producer-owned),
+`HEAD_INDEX` (consumer-owned), `CSTATE_INDEX` (consumer-published park flag). Cacheline isolation
+avoids producer-consumer RFO ping-pong.
 
-- `WRITE_INDEX` and `READ_INDEX` sit on different 64 B cachelines to avoid producer-consumer RFO ping-pong.
-- The seqlock (`SEQ_INDEX`) only guards `resetIndexes`, since a joint `(write=0, read=0)` transition must appear atomic to a reader that might otherwise observe `read > write` mid-reset. Steady-state commits use plain `Atomics.store` on `WRITE_INDEX`, which is sufficient under the SPSC invariant (each cursor has one writer, `Int32` cannot tear).
-- Wakeup uses `Atomics.waitAsync` on `WRITE_INDEX`; `resetIndexes` re-notifies that address, so the reader is woken whether the change came from a commit or a reset.
+**The seqlock is gone.** It existed solely to make the joint `(write=0, read=0)` transition of
+`resetIndexes` appear atomic. With no reset, there is no multi-word transition to protect: each
+cursor has exactly one writer and `Int32` cannot tear, so plain `Atomics.store` / `Atomics.load`
+carry the required release/acquire ordering. This also removed the per-call object allocation in
+the old `readState`, which ran on every message.
 
-This is the outcome of a targeted pass covering (a) removing an `Atomics.waitAsync` availability fallback that was dead on supported Node versions, (b) reducing the per-commit atomic count from 4 to 2, and (c) padding for cacheline isolation. See the `sab_ring.ts` header comment for the layout invariants.
+Two properties the free-running cursors depend on:
+
+- **`dataBytes` must be a power of two.** Index wrap is `cursor & mask`, which stays contiguous
+  across the `int32` sign flip only when `dataBytes` divides 2^32. With a non-power-of-two size
+  the wrap point jumps — a 5000-byte ring skips from index 3647 to 1352 — and frames desync.
+  `makeSabRing` enforces this; `toPowerOfTwo` rounds config values up.
+- **Distance arithmetic must be unsigned.** Cursors are free-running `int32` and *do* go negative;
+  at 30 k msg/s the cursor completes a full 2^32 cycle roughly every 20 minutes, so this is
+  routine rather than a corner case. Free space is `cap - ((tail - head) >>> 0)`. Dropping the
+  `>>> 0` makes the subtraction produce a huge positive number after the wrap, and the ring
+  concludes it has infinite space and overwrites unread data.
 
 ## Comparison with `pinojs/thread-stream`
 
 `thread-stream` is the SAB transport underlying pino's worker-thread destination. It is the most mature published Node SPSC SAB channel and covers the same problem as dogsvr's `sab_line`: shipping UTF-8 log lines from a producer thread to a consumer thread via `SharedArrayBuffer`. This section compares the two **for the line-stream case only**. `sab_msg` is deliberately out of scope — it carries RPC-shaped `Msg` frames (head JSON + body bytes/string), a different problem with a different design center.
 
-Both use the **same core primitive** at L1 — a drain-reset byte buffer with monotonic `WRITE_INDEX` / `READ_INDEX`, resetting both cursors to zero when the reader catches the writer. The disagreements below all sit above that primitive.
+The two **used to share the same L1 shape** — a drain-reset byte buffer with monotonic `WRITE_INDEX` / `READ_INDEX`. As of 2026-09 they diverge: dogsvr moved to a free-running classic ring to enable notify elision, while `thread-stream` still resets. Most of the comparison below sits above the primitive and is unaffected; where the divergence matters it is called out.
 
 | Dimension | `thread-stream` | dogsvr `sab_line` |
 |---|---|---|
 | Ring primitive | Drain-reset (resets on `resetIndexes` when leftover tail space is zero) | Drain-reset (resets on `resetIndexes` when `write === read && write !== 0`) |
 | Producer path | Main-thread `write()` appends chunks to a local array; batched `setImmediate` flush into SAB | `SabLogWriter.write` writes each line directly into SAB |
 | Framing | UTF-8 byte stream, chunks concatenated at the byte level | 4 B length prefix + UTF-8 bytes per line |
-| UTF-8 encoding safety | Historically had a multibyte-split bug at the tail (PR #217) — encoded byte count was computed against a stale offset | Encodes into scratch first (`scratch.write(line, 0, maxBytes, 'utf8')`), takes the returned byte count as truth, then checks space |
+| UTF-8 encoding safety | Historically had a multibyte-split bug at the tail (PR #217) — encoded byte count was computed against a stale offset | Claims an upper bound (`str.length * 3`), writes directly into the ring, and takes `Buffer.write`'s return value as truth; `commit` reconciles the real length |
 | Backpressure signal | Node-stream `'drain'` event when free space drops below buffered length | `tryWrite === false` returned directly to the caller |
 | Backpressure response | Producer waits for `'drain'`; buffer eventually drains and reset happens | Wrapper (`SabLogWriter`) routes the line via fallback: `MessagePort.postMessage` for `warn+` lines, per-level drop counter for lower levels |
 | Wait/wake | `Atomics.waitAsync` on the main side (since PR #178); worker uses `Atomics.wait` | `Atomics.waitAsync` on the reader; the wrapper does not block |
@@ -153,7 +244,15 @@ Both use the **same core primitive** at L1 — a drain-reset byte buffer with mo
 
 ### Where the designs agree
 
-Same L1 primitive (drain-reset), same wait primitive (`Atomics.waitAsync` on the reader side is the correct modern choice), same seqlock intent. Two independently-evolved implementations landing on the same L1 shape is a mild sanity check on the choice.
+Same wait primitive — `Atomics.waitAsync` on the reader side is the correct modern choice, and
+both arrived at it independently.
+
+The two no longer agree on the L1 shape, so the old "two independent implementations converged,
+which is mild evidence the choice is right" argument no longer applies. It is worth being explicit
+that this is not evidence dogsvr is right and `thread-stream` is wrong: the designs optimise for
+different things. `thread-stream` batches on the producer side, which amortises the notify cost
+that dogsvr instead eliminates with a handshake. Batching would have been a legitimate alternative
+route to the same goal — see "What not to borrow" below.
 
 ### Where dogsvr goes further at the primitive layer
 
@@ -173,7 +272,7 @@ Whether these matter depends on producer path. dogsvr's per-line writes make the
 ### Where dogsvr should borrow
 
 - **Worker `name` option** (PR #191). `new Worker(..., { name })` (Node 20+) surfaces the worker's role in OS-level tooling (`top -H`, `htop`, `perf`, gdb, eBPF). dogsvr's multi-layer fork (pm2 → server → Worker) currently shows only generic `node` process names, which makes OS-side correlation harder. Cheap, non-breaking, worth doing.
-- **The "encode-first" discipline that `thread-stream` PR #217 arrived at the hard way.** dogsvr's `sab_line.ts` already writes into a scratch buffer first and takes the returned byte count as truth. Preserve that order: any change that computes UTF-8 byte length from `.length` or a locally-estimated size, and *then* writes, opens the same class of tail-truncation bug that #217 fixed.
+- **The "trust the encoder's return value" discipline that `thread-stream` PR #217 arrived at the hard way.** dogsvr's `sab_line.ts` no longer uses a scratch buffer — it claims an upper bound and writes straight into the ring — but the underlying rule is unchanged and now matters *more*: `Buffer.write` truncates silently at a codepoint boundary when it runs out of room, returning a short count with no error and no replacement character. So the claim must cover the worst case (`str.length * 3`), never "however much room is left". Any change that sizes the claim from `.length` alone, or that writes before reserving, reopens exactly the #217 class of bug.
 
 ### What not to borrow (yet)
 
@@ -184,8 +283,8 @@ Whether these matter depends on producer path. dogsvr's per-line writes make the
   - **Hang-detected-kill diagnostics.** A special case of the above: when the hang detector fires, the interesting lines are the last few before the loop entered. Per-line keeps those in the SAB rather than in a not-yet-flushed local queue. Value depends on how tight the log-then-hang causal chain typically is.
 
   What per-line gives up that batching would save:
-  - **Atomic-op amortization.** Each line pays one `Atomics.store(WRITE_INDEX)` + one `Atomics.notify`. Batching would fold N lines into one commit. Whether that matters depends on how much of a line's total cost is atomic ops vs everything else (JSON assembly, chindings, `Buffer.write`, dispatch). At low sustained throughput the ratio is invisible; at high sustained throughput it can dominate. dogsvr's steady-state log QPS and the CPU share of atomic ops on the SAB path are **not measured**, so we do not know where dogsvr lives on that curve.
-  - **Reader-wakeup coalescing.** Reader is woken per commit (one `Atomics.notify` per line vs one per batch). Same measurement gap.
+  - **Atomic-op amortization.** Each line pays one `Atomics.store(TAIL)` plus one `Atomics.load(CSTATE)`. Batching would fold N lines into one commit. This gap has **narrowed substantially**: the expensive part used to be the unconditional `Atomics.notify` (~6 µs when it woke a parked consumer), and notify elision already removes 99 %+ of those. What remains is a store and a load, ~10 ns each, which is unlikely to be worth a crash-tail window.
+  - **Reader-wakeup coalescing.** This was the strongest argument for batching and it is now largely moot: with the line channel's consumer in poll mode, the producer's `CSTATE` check finds `AWAKE` while traffic is flowing and issues no notify at all.
 
   Bottom line: per-line is the default, chosen because (a) it protects the pre-SAB tail on business-worker crashes, and (b) no measurement has yet shown the atomic-op cost matters. Revisit when any of these become true:
   - A `perf` / `linux profile` sample under representative load shows atomic ops on the SAB path in a significant CPU bucket (order of magnitude worth thinking about, not just visible in the flame graph).
@@ -201,4 +300,4 @@ Whether these matter depends on producer path. dogsvr's per-line writes make the
 - [`common_directory_discipline.md`](common_directory_discipline.md) — how `src/common/` is scoped.
 - V8 blog, "Efficient JavaScript concurrency with Atomics" — Atomics semantics on modern V8 (memory ordering, waitAsync).
 - Node.js docs, `worker_threads` — `MessagePort` structured-clone cost, the fallback path both wrappers use.
-- [`pinojs/thread-stream`](https://github.com/pinojs/thread-stream) — pino's SAB transport. Also uses a drain-reset primitive (`resetIndexes` when leftover tail space reaches zero) but differs from dogsvr in two ways: main-thread `write()` buffers chunks into a local array and flushes in batches on `setImmediate`, and buffer-full triggers a Node-stream `'drain'` event rather than an early `tryWrite === false`. PR [#178](https://github.com/pinojs/thread-stream/pull/178) migrated its main-thread wait from `setTimeout` polling to `Atomics.waitAsync` (dogsvr's `waitForData` uses the same primitive). PR [#217](https://github.com/pinojs/thread-stream/pull/217) fixed a multibyte-UTF-8 boundary bug — dogsvr's `sab_line.ts` avoids the same class by encoding into a scratch buffer first (`scratch.write(line, 0, maxBytes, 'utf8')`) and only then checking whether the encoded byte count fits; contributors touching the encode path should preserve that "encode first, size-check second" order.
+- [`pinojs/thread-stream`](https://github.com/pinojs/thread-stream) — pino's SAB transport. Uses a drain-reset primitive (`resetIndexes` when leftover tail space reaches zero), which is what dogsvr used until 2026-09. It also differs in that main-thread `write()` buffers chunks into a local array and flushes in batches on `setImmediate`, and buffer-full triggers a Node-stream `'drain'` event rather than an early `tryWrite === false`. PR [#178](https://github.com/pinojs/thread-stream/pull/178) migrated its main-thread wait from `setTimeout` polling to `Atomics.waitAsync` (`sab_pump.ts` uses the same primitive). PR [#217](https://github.com/pinojs/thread-stream/pull/217) fixed a multibyte-UTF-8 boundary bug — see "Where dogsvr should borrow" for why that lesson still binds after the scratch buffer was removed.

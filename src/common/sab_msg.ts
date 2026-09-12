@@ -1,216 +1,200 @@
 import type { Msg, MsgHeadType, MsgBodyType } from "./message";
 import {
-    SabRingView,
-    WRITE_INDEX,
-    READ_INDEX,
+    SabRingWriter,
+    SabRingReader,
     makeSabRing,
     openSabRing,
-    readState,
-    commitWrite,
-    commitRead,
-    resetIndexes,
-    waitAsync,
+    toPowerOfTwo,
+    isRingDrained,
 } from "./sab_ring";
-
-const FRAME_LEN_BYTES = 4;
-const BODY_BINARY_BIT = 0x8000_0000;
-const BODY_LEN_MASK = 0x7fff_ffff;
+import { SabPump } from "./sab_pump";
 
 export const DEFAULT_MSG_SAB_DATA_BYTES = 1 * 1024 * 1024;
-export const DEFAULT_WAIT_ON_FULL_MS = 1;
+
+/** meta bits. cmdId is deliberately NOT packed here — bit-packing measured slower than a plain u32. */
+const HAS_TRACEPARENT = 1 << 0;
+const HAS_EXT = 1 << 1;
+const BODY_BINARY = 1 << 2;
+
+/** gid goes first: the payload start is 8B-aligned, so setFloat64 is aligned for free. */
+const OFF_GID = 0;
+const OFF_CMD_ID = 8;
+const OFF_TXN_ID = 12;
+const OFF_ZONE_ID = 16;
+const OFF_ERR_CODE = 20;
+const OFF_OPEN_ID_LEN = 24;
+const OFF_TP_LEN = 26;
+const FIXED_HEAD_BYTES = 28;
+
+/** Everything not listed here rides in the ext JSON, including future MsgHeadType fields. */
+const FIXED_KEYS = new Set(["cmdId", "openId", "zoneId", "gid", "txnId", "errCode", "_otel"]);
+
+/** Worst-case UTF-8 expansion per JS char, for sizing the claim before writing. */
+const MAX_UTF8_PER_CHAR = 3;
 
 export function makeMsgSab(dataBytes: number): SharedArrayBuffer {
-    return makeSabRing(dataBytes);
+    return makeSabRing(toPowerOfTwo(dataBytes));
 }
 
-export class SabMsgWriter {
-    private view: SabRingView;
-    private bufView: Buffer;
-    private dv: DataView;
-
-    constructor(sab: SharedArrayBuffer) {
-        this.view = openSabRing(sab);
-        this.bufView = Buffer.from(this.view.data.buffer, this.view.data.byteOffset, this.view.dataBytes);
-        this.dv = new DataView(this.view.data.buffer, this.view.data.byteOffset, this.view.dataBytes);
-    }
-
+export class SabMsgWriter extends SabRingWriter {
     tryWrite(msg: Msg): boolean {
-        const {view, bufView, dv} = this;
-        const headJson = JSON.stringify(msg.head);
-        const headLen = Buffer.byteLength(headJson, "utf8");
-        const bodyIsBinary = typeof msg.body !== "string";
-        const bodyLen = bodyIsBinary ? (msg.body as Uint8Array).length : Buffer.byteLength(msg.body as string, "utf8");
-        if (bodyLen > BODY_LEN_MASK) throw new Error(`msg body too large: ${bodyLen}`);
+        const head = msg.head;
+        const body = msg.body;
+        const bodyIsBinary = typeof body !== "string";
 
-        const frameLen = FRAME_LEN_BYTES + headLen + FRAME_LEN_BYTES + bodyLen;
-        if (frameLen > view.dataBytes) throw new Error(`msg frame too large: ${frameLen} > ${view.dataBytes}`);
+        const openId = head.openId;
+        const traceparent = head._otel?.traceparent;
 
-        let { write, read } = readState(view.state);
-        if (write === read && write !== 0) {
-            resetIndexes(view.state);
-            write = 0;
-            read = 0;
+        let ext: Record<string, unknown> | null = null;
+        for (const k in head) {
+            if (!FIXED_KEYS.has(k)) (ext ??= {})[k] = (head as Record<string, unknown>)[k];
         }
-        if (write >= read) {
-            if (view.dataBytes - write < frameLen) return false;
-        } else {
-            if (read - write - 1 < frameLen) return false;
+        const tracestate = head._otel?.tracestate;
+        if (tracestate !== undefined) (ext ??= {}).tracestate = tracestate;
+        const extJson = ext === null ? null : JSON.stringify(ext);
+
+        // Upper bound: real lengths are only known after Buffer.write returns.
+        const upper = FIXED_HEAD_BYTES
+            + (openId === undefined ? 0 : openId.length * MAX_UTF8_PER_CHAR)
+            + (traceparent === undefined ? 0 : traceparent.length)
+            + (extJson === null ? 0 : 4 + extJson.length * MAX_UTF8_PER_CHAR)
+            + (bodyIsBinary ? (body as Uint8Array).length : (body as string).length * MAX_UTF8_PER_CHAR);
+
+        const base = this.claim(upper);
+        if (base < 0) return false;
+
+        const {buf, dv} = this;
+        let meta = 0;
+        dv.setFloat64(base + OFF_GID, head.gid ?? 0, true);
+        dv.setUint32(base + OFF_CMD_ID, head.cmdId, true);
+        dv.setUint32(base + OFF_TXN_ID, head.txnId ?? 0, true);
+        dv.setUint32(base + OFF_ZONE_ID, head.zoneId ?? 0, true);
+        dv.setInt32(base + OFF_ERR_CODE, head.errCode ?? 0, true); // signed: errCode -1 is a real value
+
+        let off = base + FIXED_HEAD_BYTES;
+        const openIdLen = openId === undefined ? 0 : buf.write(openId, off, "utf8");
+        dv.setUint16(base + OFF_OPEN_ID_LEN, openIdLen, true);
+        off += openIdLen;
+
+        // Length-prefixed rather than a fixed 55B slot: the W3C propagator accepts longer
+        // future-version strings on extract, and truncating one silently drops trace context.
+        let tpLen = 0;
+        if (traceparent !== undefined) {
+            tpLen = buf.write(traceparent, off, "latin1");
+            meta |= HAS_TRACEPARENT;
+            off += tpLen;
+        }
+        dv.setUint16(base + OFF_TP_LEN, tpLen, true);
+
+        if (extJson !== null) {
+            const extLen = buf.write(extJson, off + 4, "utf8");
+            dv.setUint32(off, extLen, true);
+            meta |= HAS_EXT;
+            off += 4 + extLen;
         }
 
-        let off = write;
-        dv.setUint32(off, headLen, true);
-        off += FRAME_LEN_BYTES;
-        bufView.write(headJson, off, headLen, "utf8");
-        off += headLen;
-
-        const bodyLenField = bodyIsBinary ? ((bodyLen | BODY_BINARY_BIT) >>> 0) : bodyLen;
-        dv.setUint32(off, bodyLenField, true);
-        off += FRAME_LEN_BYTES;
         if (bodyIsBinary) {
-            view.data.set(msg.body as Uint8Array, off);
+            const bin = body as Uint8Array;
+            buf.set(bin, off);
+            off += bin.length;
+            meta |= BODY_BINARY;
         } else {
-            bufView.write(msg.body as string, off, bodyLen, "utf8");
+            off += buf.write(body as string, off, "utf8");
         }
-        off += bodyLen;
 
-        commitWrite(view.state, off);
+        this.commit(meta, off - base);
         return true;
-    }
-
-    isDrained(): boolean {
-        const {state} = this.view;
-        return Atomics.load(state, WRITE_INDEX) === Atomics.load(state, READ_INDEX);
     }
 }
 
 export type OnMsgFn = (msg: Msg) => void;
 
 export class SabMsgReader {
-    private view: SabRingView;
-    private bufView: Buffer;
-    private dv: DataView;
+    private readonly pump: SabPump;
+    private readonly buf: Buffer;
+    private readonly dv: DataView;
+    private readonly state: Int32Array;
+    /** Read per message so setDispatch() takes effect on the next frame (hot update). */
     private onMsg: OnMsgFn;
-    private stopped = true;
-    private waiter: Promise<"ok" | "not-equal" | "timed-out"> | null = null;
-    private readOut: { msg: Msg | null; nextCursor: number } = { msg: null, nextCursor: 0 };
-    private loopBound: () => void;
 
     constructor(sab: SharedArrayBuffer, onMsg: OnMsgFn) {
-        this.view = openSabRing(sab);
-        this.bufView = Buffer.from(this.view.data.buffer, this.view.data.byteOffset, this.view.dataBytes);
-        this.dv = new DataView(this.view.data.buffer, this.view.data.byteOffset, this.view.dataBytes);
+        const view = openSabRing(sab);
+        this.buf = view.buf;
+        this.dv = view.dv;
+        this.state = view.state;
         this.onMsg = onMsg;
-        this.loopBound = () => this.loop();
+        this.pump = new SabPump(
+            new SabRingReader(sab),
+            view.state,
+            (off, len, meta) => this.readRecord(off, len, meta),
+            "park",
+        );
+    }
+
+    setOnMsg(onMsg: OnMsgFn): void {
+        this.onMsg = onMsg;
     }
 
     start(): void {
-        this.stopped = false;
-        this.loop();
+        this.pump.start();
     }
 
     stop(): void {
-        this.stopped = true;
-    }
-
-    /** Best-effort synchronous drain of everything currently visible. */
-    drainSync(): void {
-        this.pumpOnce();
+        this.pump.stop();
     }
 
     isDrained(): boolean {
-        const {state} = this.view;
-        return Atomics.load(state, WRITE_INDEX) === Atomics.load(state, READ_INDEX);
+        return isRingDrained(this.state);
     }
 
-    private loop(): void {
-        if (this.stopped) return;
-        const hadData = this.pumpOnce();
-        if (this.stopped) return;
-        if (hadData) {
-            setImmediate(this.loopBound);
-            return;
+    private readRecord(base: number, len: number, meta: number): void {
+        const {buf, dv} = this;
+        const head: MsgHeadType = { cmdId: dv.getUint32(base + OFF_CMD_ID, true) };
+        const gid = dv.getFloat64(base + OFF_GID, true);
+        if (gid !== 0) head.gid = gid;
+        const txnId = dv.getUint32(base + OFF_TXN_ID, true);
+        if (txnId !== 0) head.txnId = txnId;
+        const zoneId = dv.getUint32(base + OFF_ZONE_ID, true);
+        if (zoneId !== 0) head.zoneId = zoneId;
+        const errCode = dv.getInt32(base + OFF_ERR_CODE, true);
+        if (errCode !== 0) head.errCode = errCode;
+
+        const openIdLen = dv.getUint16(base + OFF_OPEN_ID_LEN, true);
+        const tpLen = dv.getUint16(base + OFF_TP_LEN, true);
+        let off = base + FIXED_HEAD_BYTES;
+        if (openIdLen > 0) {
+            head.openId = buf.toString("utf8", off, off + openIdLen);
+            off += openIdLen;
         }
-        this.waitForData();
-    }
-
-    private waitForData(): void {
-        if (this.stopped) return;
-        const {state} = this.view;
-        const {write, read} = readState(state);
-        if (write !== read) {
-            setImmediate(this.loopBound);
-            return;
+        if ((meta & HAS_TRACEPARENT) !== 0) {
+            head._otel = { traceparent: buf.toString("latin1", off, off + tpLen) };
+            off += tpLen;
         }
-        const res = waitAsync(state, WRITE_INDEX, write);
-        if (!res.async) {
-            setImmediate(this.loopBound);
-            return;
+        if ((meta & HAS_EXT) !== 0) {
+            const extLen = dv.getUint32(off, true);
+            off += 4;
+            try {
+                const ext = JSON.parse(buf.toString("utf8", off, off + extLen)) as Record<string, unknown>;
+                const tracestate = ext.tracestate;
+                if (typeof tracestate === "string") {
+                    delete ext.tracestate;
+                    (head._otel ??= {}).tracestate = tracestate;
+                }
+                Object.assign(head, ext);
+            } catch { /* malformed ext: keep the fixed fields already decoded */ }
+            off += extLen;
         }
-        this.waiter = res.value as Promise<"ok" | "not-equal" | "timed-out">;
-        this.waiter.then(() => {
-            this.waiter = null;
-            if (!this.stopped) this.loop();
-        });
-    }
 
-    private pumpOnce(): boolean {
-        const {view} = this;
-        const {state} = view;
-        const {write, read} = readState(state);
-        if (write === read) return false;
-
-        let cursor = read;
-        const end = write;
-        const out = this.readOut;
-        while (cursor < end) {
-            if (!this.tryRead(cursor, end, out)) break;
-            cursor = out.nextCursor;
-            const m = out.msg;
-            if (m) {
-                try { this.onMsg(m); } catch { /* caller-installed handler swallows */ }
-            }
-        }
-        if (cursor > read) commitRead(state, cursor);
-        return cursor > read;
-    }
-
-    private tryRead(cursor: number, writeEnd: number, out: { msg: Msg | null; nextCursor: number }): boolean {
-        const {bufView, dv} = this;
-        if (writeEnd - cursor < FRAME_LEN_BYTES) return false;
-        const headLen = dv.getUint32(cursor, true);
-        let off = cursor + FRAME_LEN_BYTES;
-        if (headLen === 0 || headLen > writeEnd - off) return false;
-        const headJson = bufView.toString("utf8", off, off + headLen);
-        off += headLen;
-
-        if (writeEnd - off < FRAME_LEN_BYTES) return false;
-        const bodyLenField = dv.getUint32(off, true);
-        off += FRAME_LEN_BYTES;
-        const bodyIsBinary = (bodyLenField & BODY_BINARY_BIT) !== 0;
-        const bodyLen = bodyLenField & BODY_LEN_MASK;
-        if (bodyLen > writeEnd - off) return false;
-
+        const bodyEnd = base + len;
         let body: MsgBodyType;
-        if (bodyIsBinary) {
-            const dst = Buffer.allocUnsafe(bodyLen);
-            bufView.copy(dst, 0, off, off + bodyLen);
+        if ((meta & BODY_BINARY) !== 0) {
+            const dst = Buffer.allocUnsafe(bodyEnd - off);
+            buf.copy(dst, 0, off, bodyEnd);
             body = dst;
         } else {
-            body = bufView.toString("utf8", off, off + bodyLen);
+            body = buf.toString("utf8", off, bodyEnd);
         }
-        off += bodyLen;
-
-        let head: MsgHeadType;
-        try {
-            head = JSON.parse(headJson) as MsgHeadType;
-        } catch {
-            out.msg = null;
-            out.nextCursor = off;
-            return true;
-        }
-        out.msg = { head, body } as Msg;
-        out.nextCursor = off;
-        return true;
+        this.onMsg({ head, body } as Msg);
     }
 }
 

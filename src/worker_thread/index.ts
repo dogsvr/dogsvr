@@ -23,11 +23,10 @@ const txnMgr: TxnMgr = new TxnMgr(rootLog.child({ module: "worker_thread/txnMgr"
 interface MsgChannelWorkerCfg {
     transport: 'sab' | 'postMessage';
     fallbackOnFull: boolean;
-    waitOnFullMs: number;
 }
 
 let msgChannel: WorkerSabMsgChannel | null = null;
-let msgChannelCfg: MsgChannelWorkerCfg = { transport: 'postMessage', fallbackOnFull: true, waitOnFullMs: 1 };
+let msgChannelCfg: MsgChannelWorkerCfg = { transport: 'postMessage', fallbackOnFull: true };
 const broadcastHandlers: Array<(msg: DogsvrBroadcastMsg) => void> = [];
 
 export function onWorkerBroadcast(handler: (msg: DogsvrBroadcastMsg) => void): void {
@@ -85,7 +84,6 @@ export async function workerReady(initFn: () => Promise<void>) {
     msgChannelCfg = {
         transport: cfgRaw?.transport ?? 'postMessage',
         fallbackOnFull: cfgRaw?.fallbackOnFull ?? true,
-        waitOnFullMs: cfgRaw?.waitOnFullMs ?? 1,
     };
     const sabIn = workerData?.msgSabIn as SharedArrayBuffer | undefined;
     const sabOut = workerData?.msgSabOut as SharedArrayBuffer | undefined;

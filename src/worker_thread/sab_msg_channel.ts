@@ -1,46 +1,11 @@
 import type { Msg } from "../common/message";
-import { SabMsgChannel } from "../common/sab_msg";
+import { MsgChannel } from "../common/sab_channel";
 
+/** The worker talks to exactly one peer (the main thread), so dispatch takes no peer argument. */
 export type MsgDispatchFn = (msg: Msg) => void;
 
-export class WorkerSabMsgChannel {
-    private ch: SabMsgChannel;
-    private dispatch: MsgDispatchFn;
-    private sabHits = 0;
-    private fallbackHits = 0;
-
+export class WorkerSabMsgChannel extends MsgChannel<null> {
     constructor(sabOut: SharedArrayBuffer, sabIn: SharedArrayBuffer, dispatch: MsgDispatchFn) {
-        this.dispatch = dispatch;
-        this.ch = new SabMsgChannel(sabOut, sabIn, (msg) => this.dispatch(msg));
-    }
-
-    setDispatch(fn: MsgDispatchFn): void {
-        this.dispatch = fn;
-    }
-
-    start(): void {
-        this.ch.start();
-    }
-
-    stop(): void {
-        this.ch.stop();
-    }
-
-    send(msg: Msg): boolean {
-        const ok = this.ch.trySend(msg);
-        if (ok) this.sabHits++;
-        return ok;
-    }
-
-    recordFallback(): void {
-        this.fallbackHits++;
-    }
-
-    getStats(): { sabHits: number; fallbackHits: number } {
-        return { sabHits: this.sabHits, fallbackHits: this.fallbackHits };
-    }
-
-    isSabDrained(): boolean {
-        return this.ch.isDrained();
+        super(sabOut, sabIn, null, dispatch);
     }
 }

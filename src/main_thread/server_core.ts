@@ -10,7 +10,7 @@ import { ThreadCpuSampler } from "./thread_stats";
 import type { DogsvrCtlMsg } from "../common/thread_stats_types";
 import type { DogsvrBroadcastMsg } from "../common/broadcast_types";
 import { MainSabMsgChannel } from "./sab_msg_channel";
-import { DEFAULT_MSG_SAB_DATA_BYTES, DEFAULT_WAIT_ON_FULL_MS, makeMsgSab } from "../common/sab_msg";
+import { DEFAULT_MSG_SAB_DATA_BYTES, makeMsgSab } from "../common/sab_msg";
 
 const log = rootLog.child({ module: "main_thread/server_core" });
 
@@ -22,9 +22,9 @@ export type MsgChannelTransport = 'sab' | 'postMessage';
 
 export interface MsgChannelConfig {
     transport?: MsgChannelTransport;
+    /** Rounded up to a power of two; the ring requires it. */
     sabSizeBytes?: number;
     fallbackOnFull?: boolean;
-    waitOnFullMs?: number;
 }
 
 export interface SvrConfig {
@@ -89,7 +89,6 @@ export function createServerCore(cfg: SvrConfig): ServerCore {
                 msgChannel: {
                     transport: useSab ? 'sab' : 'postMessage',
                     fallbackOnFull: msgCfg.fallbackOnFull ?? true,
-                    waitOnFullMs: msgCfg.waitOnFullMs ?? DEFAULT_WAIT_ON_FULL_MS,
                 },
                 msgSabIn,
                 msgSabOut,
