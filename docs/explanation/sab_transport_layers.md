@@ -1,6 +1,6 @@
 # SAB transport layers
 
-dogsvr routes messages between the main thread and worker threads over `SharedArrayBuffer`-backed SPSC ring buffers. The transport is split into three layers plus a thin per-thread wrapper. This note explains the layering, what each layer exposes, and the constraints future contributors must preserve.
+dogsvr routes messages between the main thread and worker threads over `SharedArrayBuffer`-backed SPSC ring buffers (SPSC = single-producer, single-consumer: exactly one writing thread and one reading thread per ring, which is what makes lock-free cursors safe here). The transport is split into three layers plus a thin per-thread wrapper. This note explains the layering, what each layer exposes, and the constraints future contributors must preserve.
 
 ## Why three layers
 
@@ -98,10 +98,15 @@ The reader/writer sit on the fast path for every cross-thread message. The follo
 
 ## Notify elision (why `CSTATE` exists)
 
-Waking a thread parked on `Atomics.waitAsync` costs ~6 µs (futex wake + libuv hop). A seq-cst
-barrier costs ~10 ns. The old primitive paid a `notify` on every `commitWrite` plus another on
-every `resetIndexes`, whether or not anyone was parked — which is where the bulk of the SAB
-transport's CPU went.
+Waking a thread parked on `Atomics.waitAsync` is expensive (futex wake + libuv hop): measured at
+**4 749 ns** on Node 24.13, versus **29 ns** for the store-plus-load that replaces it, and 57 ns
+for a `notify` with nobody parked. The old primitive paid a `notify` on every `commitWrite` plus
+another on every `resetIndexes`, whether or not anyone was parked.
+
+`CSTATE` is **not** tied to the ring shape. A drain-reset ring can elide notifies just as well,
+provided it parks on a value nothing rewinds (its monotonic `SEQ`) rather than on `WRITE`. See
+[sab_ring_design.md](sab_ring_design.md#notify-elision-is-orthogonal-to-ring-shape) for the
+measurement; an earlier version of both notes claimed otherwise.
 
 The consumer now publishes its intent in a third slot, and the producer checks it:
 
@@ -122,9 +127,21 @@ Two invariants follow, and both are easy to break:
 - **`stop()` leaves `CSTATE` as `AWAKE`**, so a producer racing a shutting-down reader does
   not notify a dead consumer.
 
-Measured on the real implementation: a busy consumer elides 99%+ of notifies, because it is
-rarely parked. The busier the consumer, the more this saves — which is exactly the regime
-where the transport was previously most expensive.
+Measured on the real implementation, counting `Atomics.notify` calls — and the answer depends
+entirely on the pump mode:
+
+| producer spacing | line channel (`poll`) | msg channel (`park`) |
+|---|---:|---:|
+| back-to-back | 100 % elided | ~97 % elided |
+| 3 µs apart | 100 % elided | ~42 % elided |
+| 20 µs apart | 100 % elided | ~3 % elided |
+
+A `poll`-mode consumer stays `AWAKE` while traffic flows, so the producer never notifies. A
+`park`-mode consumer is parked by construction between messages, so at realistic spacing the
+`CSTATE` check finds `PARKED` and the notify fires anyway. **The blanket claim "elision removes
+99 %+ of notifies" holds for `sab_line`, not for `sab_msg`.** If the msg channel's notify cost
+ever shows up in a profile, the lever is the pump mode (or a `waitAsync` timeout hybrid — the
+four-argument form works on Node 24.13), not the ring.
 
 ## Hot-update drain semantics (the easy trap)
 

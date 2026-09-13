@@ -16,7 +16,30 @@ const HAS_TRACEPARENT = 1 << 0;
 const HAS_EXT = 1 << 1;
 const BODY_BINARY = 1 << 2;
 
-/** gid goes first: the payload start is 8B-aligned, so setFloat64 is aligned for free. */
+/**
+ * Record layout (all little-endian):
+ *
+ * ```
+ *   +-----+-----+-----+------+---------+------------+-------+---------------
+ *   | gid | cmd | txn | zone | errCode | openIdLen  | tpLen | variable ...
+ *   | f64 | u32 | u32 | u32  |  i32    |    u16     |  u16  |
+ *   +-----+-----+-----+------+---------+------------+-------+---------------
+ *   0     8     12    16     20        24           26      28    ← byte offset
+ * ```
+ *
+ * Variable region (in this order, presence controlled by `meta` bits):
+ *   - openId       utf8,   openIdLen bytes            (omitted iff openIdLen == 0)
+ *   - traceparent  latin1, tpLen     bytes            iff meta & HAS_TRACEPARENT
+ *   - extLen(u32) + ext JSON (utf8, extLen bytes)     iff meta & HAS_EXT
+ *   - body         utf8 or raw bytes, to end          binary iff meta & BODY_BINARY
+ *
+ * _otel split: traceparent takes the fast path (dedicated slot, latin1 memcpy) since it's on every msg when tracing is on;
+ *              tracestate rides in ext JSON — rare in-process, not worth a second slot.
+ *
+ * meta lives in the sab_ring frame header (via commit/readRecord), not in this payload.
+ *
+ * gid goes first: the payload start is 8B-aligned, so setFloat64 is aligned for free.
+ */
 const OFF_GID = 0;
 const OFF_CMD_ID = 8;
 const OFF_TXN_ID = 12;

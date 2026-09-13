@@ -28,8 +28,13 @@ export type MsgHeadType = {
     clOptions?: ClOptions,
     errCode?: number,
     errMsg?: string,
-    /** W3C trace-context carrier for main↔worker propagation. Framework-internal — business code must not read or write this. */
-    _otel?: Record<string, string>
+    /**
+     * W3C trace-context carrier for main↔worker propagation.
+     * Framework-internal — business code must not read or write this.
+     * Shape frozen to traceparent + tracestate: W3C Trace Context won't add new headers (Level 2 evolves within these two);
+     * baggage is a separate carrier.
+     */
+    _otel?: { traceparent?: string; tracestate?: string }
 };
 
 /** Message body, either binary (Uint8Array) or text (string). */

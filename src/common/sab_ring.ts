@@ -21,6 +21,8 @@ export const RECORD_HEADER_BYTES = 8;
 const PADDING_FLAG = 0x8000_0000 | 0;
 
 const MIN_DATA_BYTES = 4096;
+// Cap at 2^31: `(tail - head) >>> 0` reads used-bytes mod 2^32; cap == 2^32 makes full alias empty.
+const MAX_DATA_BYTES = 2 ** 31;
 
 export interface SabRingView {
     state: Int32Array;
@@ -36,8 +38,8 @@ export interface SabRingView {
  * contiguous across the int32 sign flip, which only holds when dataBytes divides 2^32.
  */
 export function makeSabRing(dataBytes: number): SharedArrayBuffer {
-    if (!Number.isInteger(dataBytes) || dataBytes < MIN_DATA_BYTES || (dataBytes & (dataBytes - 1)) !== 0) {
-        throw new Error(`sab ring dataBytes must be a power of two >= ${MIN_DATA_BYTES}, got ${dataBytes}`);
+    if (!Number.isInteger(dataBytes) || dataBytes < MIN_DATA_BYTES || dataBytes > MAX_DATA_BYTES || (dataBytes & (dataBytes - 1)) !== 0) {
+        throw new Error(`sab ring dataBytes must be a power of two in [${MIN_DATA_BYTES}, ${MAX_DATA_BYTES}], got ${dataBytes}`);
     }
     return new SharedArrayBuffer(STATE_BYTES + dataBytes);
 }
